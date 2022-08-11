@@ -16,4 +16,6 @@ require (
 	golang.org/x/time v0.0.0-20210220033141-f8bda1e9f3ba
 )
 
+replace github.com/miekg/dns v1.1.34 => github.com/loujie1/dns v1.1.51
+
 go 1.13

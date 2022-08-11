@@ -90,7 +90,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Run() {
 	go s.ListenAndServeDNS("udp")
 	go s.ListenAndServeDNS("tcp")
-	go s.ListenAndServeDNS("squic")
+	//go s.ListenAndServeDNS("squic")
 	go s.ListenAndServeDNSTLS()
 	go s.ListenAndServeHTTPTLS()
 }
