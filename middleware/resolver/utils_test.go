@@ -71,3 +71,18 @@ func Test_extractRRSet(t *testing.T) {
 	rre := extractRRSet(rr, "test.com.", dns.TypeA)
 	assert.Len(t, rre, 3)
 }
+
+func Test_parseTXTasSCIONAddr(t *testing.T) {
+	rr, err := dns.NewRR("test.com. 3600 IN TXT \"scion=17-ffaa:0:1102,129.132.121.164\"")
+	if err != nil {
+		t.Error(err)
+	}
+	txt, ok := rr.(*dns.TXT)
+	assert.Equal(t, true, ok)
+	assert.Equal(t, txt.Header().Name, "test.com.")
+
+	addr, ok := parseTXTasSCIONAddr(txt)
+	assert.Equal(t, "17-ffaa:0:1102,[129.132.121.164]", addr)
+	assert.Equal(t, true, ok)
+
+}

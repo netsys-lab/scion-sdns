@@ -24,6 +24,7 @@ type Config struct {
 	BlockListDir      string
 	RootServers       []string
 	Root6Servers      []string
+	RootSCIONServers  []string
 	RootKeys          []string
 	FallbackServers   []string
 	ForwarderServers  []string
@@ -118,6 +119,10 @@ rootservers = [
 
 # Root zone ipv6 servers
 root6servers = [
+]
+
+# Root zone scion servers
+rootSCIONservers = [
 ]
 
 # Trusted anchors for dnssec

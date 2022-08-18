@@ -90,7 +90,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Run() {
 	go s.ListenAndServeDNS("udp")
 	go s.ListenAndServeDNS("tcp")
-	//go s.ListenAndServeDNS("squic")
+	go s.ListenAndServeDNS("quic-scion")
 	go s.ListenAndServeDNSTLS()
 	go s.ListenAndServeHTTPTLS()
 }
@@ -105,7 +105,7 @@ func (s *Server) ListenAndServeDNS(network string) {
 		listener  net.Listener
 		err       error
 	)
-	if network == "squic" {
+	if network == "quic-scion" {
 		network = "tcp"
 		listener, err = sqnet.ListenString(s.addr)
 		if err != nil {

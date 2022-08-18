@@ -124,6 +124,19 @@ func getIPAddressFromScionTXT(txt *dns.TXT) net.IP {
 	return addr
 }
 
+func parseTXTasSCIONAddr(txt *dns.TXT) (addr string, ok bool) {
+	content := strings.Join(txt.Txt, "")
+	keyvalue := strings.Split(content, "=")
+	if strings.ToLower(keyvalue[0]) == "scion" && len(keyvalue) == 2 {
+		tokens := strings.SplitAfter(keyvalue[1], ",")
+		if len(tokens) == 2 {
+			addr = tokens[0] + "[" + tokens[1] + "]"
+			ok = true
+		}
+	}
+	return
+}
+
 func parseIPv4(s string) net.IP {
 	var p [net.IPv4len]byte
 	for i := 0; i < net.IPv4len; i++ {

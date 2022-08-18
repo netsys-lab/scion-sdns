@@ -1,4 +1,4 @@
-GO ?= go
+GO ?= $(GOPATH)/bin/go1.17
 TESTFOLDER := $(shell $(GO) list ./...)
 BIN = sdns
 

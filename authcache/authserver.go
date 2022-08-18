@@ -25,6 +25,9 @@ const (
 
 	// IPv6 mode
 	IPv6 Version = 0x2
+
+	// QUIC-SCION mode
+	QUIC_SCION Version = 0x3
 )
 
 // NewAuthServer return a new server
@@ -41,6 +44,8 @@ func (v Version) String() string {
 		return "IPv4"
 	case IPv6:
 		return "IPv6"
+	case QUIC_SCION:
+		return "QUIC-SCION"
 	default:
 		return "Unknown"
 	}
