@@ -94,8 +94,7 @@ func verifyRhineROA(roa *ROA, certFile string) bool {
 		expired = "(*EXPIRED*)"
 	}
 	if err := sig.VerifyWithPublicKey(publiKey, []dns.RR{key}); err != nil {
-		log.Warn("[RHINE] ;- Bogus signature, %s does not validate (RCert) [%s] %s\n",
-			shortSig(sig), err.Error(), expired)
+		log.Error("RHINE Verify ROA", "sig", shortSig(sig), "error", err, "expired?", expired)
 		return false
 	}
 
@@ -114,7 +113,7 @@ func ParseVerifyRhineCertTxtEntry(txt *dns.TXT, certFile string) (*x509.Certific
 
 	cert, err := x509.ParseCertificate(certdecoded)
 	if err != nil {
-		log.Warn("Parsing Rhine Cert failed! ", err)
+		log.Error("RHINE Parsing Cert", "error", err)
 		return nil, nil, err
 	}
 
@@ -131,7 +130,7 @@ func ParseVerifyRhineCertTxtEntry(txt *dns.TXT, certFile string) (*x509.Certific
 		DNSName: apexname,
 		Roots:   CaCertPool,
 	}); err != nil {
-		log.Warn("Rhine Cert Verification Failed!", err)
+		log.Error("RHINE Cert Verification", "error", err)
 		return nil, nil, err
 	}
 
@@ -198,14 +197,14 @@ func IsDSP(txt *dns.TXT) bool {
 
 func rhineRRSigCheck(in *dns.Msg, key *dns.DNSKEY) bool {
 	if key == nil {
-		log.Warn("[RHINE] DNSKEY not found for RRSIG checking\n")
+		log.Error("RHINE DNSKEY not found for RRSIG")
 		return false
 	}
-	log.Debug("[RHINE] Start checking RRSIG in Answer section\n")
+	log.Debug("RHINE Start checking RRSIG in Answer section")
 	if !sectionCheck(in.Answer, key) {
 		return false
 	}
-	log.Debug("[RHINE] Start checking RRSIG in Ns section\n")
+	log.Debug("RHINE Start checking RRSIG in Ns section")
 	if !sectionCheck(in.Ns, key) {
 		return false
 	}
@@ -222,11 +221,10 @@ func sectionCheck(set []dns.RR, key *dns.DNSKEY) (ok bool) {
 			}
 			rrset := getRRset(set, rr.Header().Name, rr.(*dns.RRSIG).TypeCovered)
 			if err := rr.(*dns.RRSIG).Verify(key, rrset); err != nil {
-				log.Warn("[RHINE] ;- Bogus signature, %s does not validate (DNSKEY %s/%d) [%s] %s\n",
-					shortSig(rr.(*dns.RRSIG)), key.Header().Name, key.KeyTag(), err.Error(), expired)
+				log.Error("RHINE signature does not validate", "sig", shortSig(rr.(*dns.RRSIG)), "name", key.Header().Name, "tag", key.KeyTag(), "error", err.Error(), "expired?", expired)
 				ok = false
 			} else {
-				log.Info("[RHINE] ;+ Secure signature, %s validates (DNSKEY %s/%d) %s\n", shortSig(rr.(*dns.RRSIG)), key.Header().Name, key.KeyTag(), expired)
+				log.Info("RHINE signature validates", "sig", shortSig(rr.(*dns.RRSIG)), "name", key.Header().Name, "tag", key.KeyTag(), "expired?", expired)
 			}
 		}
 	}

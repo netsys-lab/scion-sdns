@@ -162,6 +162,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 	log.Debug("Query inserted", "reqid", minReq.Id, "zone", servers.Zone, "query", formatQuestion(minReq.Question[0]), "cd", req.CheckingDisabled, "qname-minimize", minimized, "extra", extra)
 
 	resp, err := r.groupLookup(ctx, minReq, servers)
+	//log.Debug("Resolve", "ctx", ctx, "minReq", minReq, "servers", servers, "resp", resp, "err", err)
 	if err != nil {
 		if minimized {
 			// return without minimized
@@ -587,6 +588,7 @@ func (r *Resolver) lookupSCIONNss(ctx context.Context, q dns.Question, authserve
 }
 
 func (r *Resolver) checkNss(ctx context.Context, servers *authcache.AuthServers) (ok bool) {
+	log.Debug("checkNss", "servers", servers)
 	servers.RLock()
 	oldsize := len(servers.List)
 	if servers.Checked || dns.CountLabel(servers.Zone) < 2 {
@@ -693,8 +695,11 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 	foundscion := make(nameservers)
 
 	nsscion := make(map[string][]string)
+	log.Debug("GLUE RR", "resp", resp, "nss", nss)
+
 	for _, a := range resp.Extra {
 		if extra, ok := a.(*dns.TXT); ok {
+
 			name := strings.ToLower(extra.Header().Name)
 			qname := resp.Question[0].Name
 
@@ -918,6 +923,7 @@ func (r *Resolver) setTags(req, resp *dns.Msg) *dns.Msg {
 }
 
 func (r *Resolver) checkDname(ctx context.Context, resp *dns.Msg) (*dns.Msg, bool) {
+	log.Debug("checkDname")
 	if len(resp.Question) == 0 {
 		return nil, false
 	}
@@ -1720,6 +1726,7 @@ func (r *Resolver) checkPriming() {
 		panic("root servers list empty. check your config file")
 	}
 
+	log.Debug("checkPriming", "question", req.Question)
 	resp, err := r.Resolve(ctx, req, r.rootservers, true, 5, 0, false, nil, true)
 	if err != nil {
 		log.Error("root servers update failed", "error", err.Error())
