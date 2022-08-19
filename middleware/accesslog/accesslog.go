@@ -70,7 +70,10 @@ func (a *AccessLog) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 			strconv.Itoa(resp.Len()),
 		}
 
-		_, err := a.logFile.WriteString(strings.Join(record, " ") + "\n")
+		output := strings.Join(record, " ") + "\n"
+		log.Debug("AccessLog", "logline", output)
+
+		_, err := a.logFile.WriteString(output)
 		if err != nil {
 			log.Error("Access log write failed", "error", strings.Trim(err.Error(), "\n"))
 		}

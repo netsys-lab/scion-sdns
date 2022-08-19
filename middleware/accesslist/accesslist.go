@@ -56,12 +56,19 @@ func (a *AccessList) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 		return
 	}
 
-	allowed, _ := a.ranger.Contains(ch.Writer.RemoteIP())
+	remote := ch.Writer.RemoteIP()
+	allowed, _ := a.ranger.Contains(remote)
 
 	if !allowed {
-		//no reply to client
-		ch.Cancel()
-		return
+		proto := ch.Writer.Proto()
+		if remote != nil && proto != "scion" {
+			//no reply to client
+			log.Debug("AccessList DENIED", "remote", ch.Writer.RemoteIP(), "proto", ch.Writer.Proto())
+			ch.Cancel()
+			return
+		} else {
+			log.Debug("AccessList", "exemption for proto", proto)
+		}
 	}
 
 	ch.Next(ctx)

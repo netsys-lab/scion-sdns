@@ -159,7 +159,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 	// Current default minimize level 5, if we down to level 3, performance gain 20%
 	minReq, minimized := r.minimize(req, level, nomin)
 
-	log.Debug("Query inserted", "reqid", minReq.Id, "zone", servers.Zone, "query", formatQuestion(minReq.Question[0]), "cd", req.CheckingDisabled, "qname-minimize", minimized)
+	log.Debug("Query inserted", "reqid", minReq.Id, "zone", servers.Zone, "query", formatQuestion(minReq.Question[0]), "cd", req.CheckingDisabled, "qname-minimize", minimized, "extra", extra)
 
 	resp, err := r.groupLookup(ctx, minReq, servers)
 	if err != nil {
@@ -346,6 +346,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		log.Debug("Nameserver cache not found", "key", key, "query", formatQuestion(q), "cd", cd)
 
 		authservers, foundv4, foundv6, foundscion := r.checkGlueRR(resp, nss, level)
+		log.Debug("CheckGlueRR", "authservers", authservers, "foundv4", foundv4, "foundv6", foundv6, "foundscion", foundscion)
 		authservers.CheckingDisable = cd
 		authservers.Zone = q.Name
 
@@ -546,7 +547,7 @@ func (r *Resolver) lookupSCIONNss(ctx context.Context, q dns.Question, authserve
 			continue
 		}
 
-		ctx, loop := r.checkLoop(ctx, name, dns.TypeAAAA)
+		ctx, loop := r.checkLoop(ctx, name, dns.TypeTXT)
 		if loop {
 			if _, ok := r.getSCIONCache(name); !ok {
 				log.Debug("Looping during ns SCION lookup", "query", formatQuestion(q), "ns", name)
@@ -668,8 +669,8 @@ addrsloopv6:
 	}
 
 addrsloopscion:
-	for _, addr := range raddrsv6 {
-		// TODO, see above
+	for _, addr := range raddrsscion {
+		// TODO no scion equivalent of JoinHostPort yet
 		raddr := addr + ":53"
 		for _, s := range servers.List {
 			if s.Addr == raddr {
@@ -1207,9 +1208,10 @@ func (r *Resolver) exchange(ctx context.Context, proto string, req *dns.Msg, ser
 	defer ReleaseConn(co) // this will be close conn also
 
 	if server.Version == authcache.QUIC_SCION {
-		// TODO, call sqnet.DialQuic(ctx, ...) here instead
-		co.Conn, err = sqnet.DialString(server.Addr)
+		log.Debug("Dialing SCION", "addr", server.Addr)
+		co.Conn, err = sqnet.DialContextString(ctx, server.Addr)
 	} else {
+		log.Debug(fmt.Sprintf("Dialing %s", proto), "addr", server.Addr)
 		d := r.newDialer(ctx, proto, server.Version)
 		co.Conn, err = d.DialContext(ctx, proto, server.Addr)
 	}

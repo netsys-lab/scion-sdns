@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/miekg/dns"
+	"github.com/semihalev/log"
 )
 
 // Chain type
@@ -32,10 +33,11 @@ func (ch *Chain) Next(ctx context.Context) {
 	if ch.count == 0 {
 		return
 	}
-
 	handler := ch.handlers[ch.head]
 	ch.head = (ch.head + 1) % len(ch.handlers)
 	ch.count--
+
+	log.Debug("Next", "handler", handler.Name())
 
 	handler.ServeDNS(ctx, ch)
 }

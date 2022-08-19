@@ -5,6 +5,7 @@ import (
 	"net"
 
 	"github.com/miekg/dns"
+	"github.com/netsec-ethz/scion-apps/pkg/pan"
 )
 
 // ResponseWriter implement of dns.ResponseWriter
@@ -49,6 +50,8 @@ func (w *responseWriter) Reset(writer dns.ResponseWriter) {
 	case (*net.UDPAddr):
 		w.proto = "udp"
 		w.remoteip = w.RemoteAddr().(*net.UDPAddr).IP
+	case (pan.UDPAddr):
+		w.proto = "scion"
 	}
 
 	w.internal = w.remoteip.IsLoopback()

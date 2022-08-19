@@ -516,8 +516,8 @@ github.com/netsec-ethz/rains v0.3.0 h1:0lMQxysRIqjI0Pvd/FSqLEp2YhSqiILUQJzyUSOc8
 github.com/netsec-ethz/rains v0.3.0/go.mod h1:RbK76EnLhQGWIIxUblVyDi1vYvqmRpCwfnHIwn/KyQE=
 github.com/netsec-ethz/scion-apps v0.5.0 h1:LJGphp6zEvdqvyM9WaolzywzIU8kwCHk6uDwDKLeEsk=
 github.com/netsec-ethz/scion-apps v0.5.0/go.mod h1:Rey9cQvuoGFB/CMYYCilHzUu3Lqaql67lOdQyXcIbYE=
-github.com/netsys-lab/sqnet v0.0.0-20220804132047-774be552c8ec h1:H4bSB014ZYAfANVhZDFmkd5fzhxBMi8QASvAIW+pVvc=
-github.com/netsys-lab/sqnet v0.0.0-20220804132047-774be552c8ec/go.mod h1:kwA3qmUgC6S5xRlpYP8qj/76ERo6KPy//6/LiiVO6h0=
+github.com/netsys-lab/sqnet v0.1.0 h1:lB/Jvm+8MtcipXx8qzFe34Qh7aZPeH7IttAQV3/V8Tw=
+github.com/netsys-lab/sqnet v0.1.0/go.mod h1:kwA3qmUgC6S5xRlpYP8qj/76ERo6KPy//6/LiiVO6h0=
 github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e h1:fD57ERR4JtEqsWbfPhv4DMiApHyliiK5xCTNVSPiaAs=
 github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e/go.mod h1:zD1mROLANZcx1PVRCS0qkT7pwLkGfwJo4zjcN/Tysno=
 github.com/nxadm/tail v1.4.4/go.mod h1:kenIhsEOeOJmVchQTgglprH7qJGnHDVpk1VPCcaMI8A=

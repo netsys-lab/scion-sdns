@@ -8,7 +8,8 @@ require (
 	github.com/gin-contrib/pprof v1.3.0
 	github.com/gin-gonic/gin v1.7.7
 	github.com/miekg/dns v1.1.34
-	github.com/netsys-lab/sqnet v0.0.0-20220804132047-774be552c8ec
+	github.com/netsec-ethz/scion-apps v0.5.0
+	github.com/netsys-lab/sqnet v0.1.0
 	github.com/prometheus/client_golang v1.12.1
 	github.com/semihalev/log v0.1.1
 	github.com/stretchr/testify v1.7.0

@@ -28,8 +28,8 @@ type Server struct {
 	dohAddr        string
 	tlsCertificate string
 	tlsPrivateKey  string
-
-	chainPool sync.Pool
+	scion          bool
+	chainPool      sync.Pool
 }
 
 // New return new server
@@ -44,6 +44,7 @@ func New(cfg *config.Config) *Server {
 		dohAddr:        cfg.BindDOH,
 		tlsCertificate: cfg.TLSCertificate,
 		tlsPrivateKey:  cfg.TLSPrivateKey,
+		scion:          cfg.SCION,
 	}
 
 	server.chainPool.New = func() interface{} {
@@ -55,6 +56,7 @@ func New(cfg *config.Config) *Server {
 
 // ServeDNS implements the Handle interface.
 func (s *Server) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+	log.Debug("Handling", "request", r.Question)
 	ch := s.chainPool.Get().(*middleware.Chain)
 
 	ch.Reset(w, r)
@@ -90,32 +92,41 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Run() {
 	go s.ListenAndServeDNS("udp")
 	go s.ListenAndServeDNS("tcp")
-	go s.ListenAndServeDNS("quic-scion")
+	if s.scion {
+		go s.ListenAndServeDNS("scion")
+	}
 	go s.ListenAndServeDNSTLS()
 	go s.ListenAndServeHTTPTLS()
 }
 
 // ListenAndServeDNS Starts a server on address and network specified Invoke handler
 // for incoming queries.
-func (s *Server) ListenAndServeDNS(network string) {
-	log.Info("DNS server listening...", "net", network, "addr", s.addr)
+func (s *Server) ListenAndServeDNS(proto string) {
+	log.Info("DNS server listening...", "proto", proto, "addr", s.addr)
 
 	var (
 		reuseport = true
 		listener  net.Listener
 		err       error
+		net       string
+		addr      string
 	)
-	if network == "quic-scion" {
-		network = "tcp"
+	if proto == "scion" {
 		listener, err = sqnet.ListenString(s.addr)
 		if err != nil {
-			log.Error("DNS listener failed", "net", network, "addr", s.addr, "error", err.Error())
+			log.Error("DNS listener failed", "proto", proto, "addr", s.addr, "error", err.Error())
 		}
+		// Hack so that dns.Server selects the listener
+		net = "tcp"
+		reuseport = false
+	} else {
+		net = proto
+		addr = s.addr
 	}
 
 	server := &dns.Server{
-		Addr:          s.addr,
-		Net:           network,
+		Addr:          addr,
+		Net:           net,
 		Listener:      listener,
 		Handler:       s,
 		MaxTCPQueries: 2048,
@@ -128,7 +139,7 @@ func (s *Server) ListenAndServeDNS(network string) {
 		err = server.ListenAndServe()
 	}
 	if err != nil {
-		log.Error("DNS listener failed", "net", network, "addr", s.addr, "error", err.Error())
+		log.Error("DNS listener failed", "proto", proto, "addr", s.addr, "error", err.Error())
 	}
 }
 
