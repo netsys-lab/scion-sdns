@@ -33,6 +33,7 @@ func (ch *Chain) Next(ctx context.Context) {
 	if ch.count == 0 {
 		return
 	}
+
 	handler := ch.handlers[ch.head]
 	ch.head = (ch.head + 1) % len(ch.handlers)
 	ch.count--
