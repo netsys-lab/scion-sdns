@@ -1727,7 +1727,7 @@ func (r *Resolver) checkPriming() {
 				if txt, ok := r.(*dns.TXT); ok {
 					addr, ok := parseTXTasSCIONAddr(txt)
 					if ok {
-						tmpservers.List = append(tmpservers.List, authcache.NewAuthServer(addr+":53", authcache.IPv4))
+						tmpservers.List = append(tmpservers.List, authcache.NewAuthServer(addr+":53", authcache.QUIC_SCION))
 					}
 				}
 			}
