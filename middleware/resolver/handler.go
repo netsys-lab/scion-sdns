@@ -207,6 +207,7 @@ func getROA(ctx context.Context, signer string, resp *dns.Msg) (roa *ROA, err er
 	if q.Qtype != dns.TypeDNSKEY || q.Name != signer {
 		msg, err = dnsutil.ExchangeInternal(ctx, keyReq)
 		if err != nil {
+			log.Warn("Err exchanging: %s", err)
 			return
 		}
 	} else if q.Qtype == dns.TypeDNSKEY {
