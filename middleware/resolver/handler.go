@@ -216,7 +216,7 @@ func getROA(ctx context.Context, signer string, resp *dns.Msg) (roa *ROA, err er
 	log.Debug(msg.String())
 	roa, ok := extractROAFromMsg(msg)
 	if !ok {
-		log.Error("Extracting ROA failed", "error", errNoROA, "roa", roa)
+		log.Error("Extracting ROA failed", "error", errNoROA, "roa", roa, "msg", msg)
 		return nil, errNoROA
 	}
 	log.Debug("ROA got from Key Request")
