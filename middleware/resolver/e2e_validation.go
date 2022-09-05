@@ -116,10 +116,12 @@ func extractROAFromMsg(msg *dns.Msg) (roa *ROA, ok bool) {
 	}
 
 	if rcert == nil || dnskey == nil || keySig == nil {
-		return nil, false
+		ok = false
+	} else {
+		ok = true
 	}
 
-	return &ROA{keySig: keySig, rcert: rcert, dnskey: dnskey, dsp: dsp}, true
+	return &ROA{keySig: keySig, rcert: rcert, dnskey: dnskey, dsp: dsp}, ok
 }
 
 func addROAToMsg(roa *ROA, msg *dns.Msg) {
