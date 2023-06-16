@@ -1181,7 +1181,8 @@ func (r *Resolver) exchange(ctx context.Context, proto string, req *dns.Msg, ser
 
 	if server.Version == authcache.QUIC_SCION {
 		log.Debug("Dialing SCION", "addr", server.Addr)
-		co.Conn, err = sqnet.DialContextString(ctx, server.Addr)
+		//co.Conn, err = sqnet.DialContextString(ctx, server.Addr)
+		co.Conn, err = sqnet.DialString(server.Addr) // -> DialQUIC in the end
 	} else {
 		log.Debug(fmt.Sprintf("Dialing %s", proto), "addr", server.Addr)
 		d := r.newDialer(ctx, proto, server.Version)

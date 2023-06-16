@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"io"
 	l "log"
 	"net"
@@ -12,8 +13,8 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/netsys-lab/sqnet"
 
+	"github.com/netsec-ethz/scion-apps/pkg/pan"
 	"github.com/semihalev/log"
 	"github.com/semihalev/sdns/config"
 	"github.com/semihalev/sdns/middleware"
@@ -106,41 +107,97 @@ func (s *Server) ListenAndServeDNS(proto string) {
 
 	var (
 		reuseport = true
-		listener  net.Listener
+		pconn     net.PacketConn
 		err       error
 		net       string
 		addr      string
 	)
 	if proto == "scion" {
-		listener, err = sqnet.ListenString(s.addr)
+		pconn, err = ListenSQUICPacket(s.addr)
 		if err != nil {
 			log.Error("DNS listener failed", "proto", proto, "addr", s.addr, "error", err.Error())
 		}
-		// Hack so that dns.Server selects the listener
-		net = "tcp"
-		reuseport = false
+
+		net = "squic"
+		addr = s.addr
+		reuseport = true
 	} else {
 		net = proto
 		addr = s.addr
 	}
 
 	server := &dns.Server{
-		Addr:          addr,
-		Net:           net,
-		Listener:      listener,
+		Addr: addr,
+		Net:  net,
+		//Listener:      listener,
+
+		PacketConn:    pconn,
 		Handler:       s,
 		MaxTCPQueries: 2048,
 		ReusePort:     reuseport,
 	}
 
-	if listener != nil {
-		err = server.ActivateAndServe()
+	if net == "squic" {
+		var cert tls.Certificate
+		cert, err = tls.LoadX509KeyPair(s.tlsCertificate, s.tlsPrivateKey)
+		if err != nil {
+			log.Error("failed to load Cert Files")
+			return
+		}
+
+		server.TLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			NextProtos:   []string{"doq", "dq", "doq-i00", "doq-i02"},
+			ClientAuth:   tls.NoClientCert,
+			MinVersion:   tls.VersionTLS12,
+			MaxVersion:   tls.VersionTLS13,
+			CipherSuites: []uint16{
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			},
+		}
+
+		err = server.ActivateAndServeSQUIC()
 	} else {
 		err = server.ListenAndServe()
 	}
 	if err != nil {
 		log.Error("DNS listener failed", "proto", proto, "addr", s.addr, "error", err.Error())
 	}
+}
+
+func ListenSQUICPacket(address string) (net.PacketConn, error) {
+
+	/*p, err := reuseport.ListenPacket("udp", s.Addr[len(transport.SQUIC+"://"):])
+	 if err != nil {
+		return nil, err
+	 }
+	  return p, nil
+	*/
+	//var ipport netaddr.IPPort
+	//var parseerror error
+	// s.Addr is something like "squic://:8853" if listening on localhost
+	//ipport, parseerror := netaddr.ParseIPPort(s.Addr[len(transport.SQUIC+"://"):])
+	//ipport, parseerror := pan.ParseOptionalIPPort(address[len("squic://"):])
+	ipport, parseerror := pan.ParseOptionalIPPort(address)
+	if parseerror != nil {
+		return nil, parseerror
+	}
+
+	pconn, e := pan.ListenUDP(context.Background(), ipport, pan.NewDefaultReplySelector())
+
+	if e != nil {
+		return nil, e
+	}
+	return pconn, nil
+
 }
 
 // ListenAndServeDNSTLS acts like http.ListenAndServeTLS
