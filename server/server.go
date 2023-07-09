@@ -26,6 +26,7 @@ import (
 type Server struct {
 	addr           string
 	tlsAddr        string
+	doqAddr        string
 	dohAddr        string
 	tlsCertificate string
 	tlsPrivateKey  string
@@ -42,6 +43,7 @@ func New(cfg *config.Config) *Server {
 	server := &Server{
 		addr:           cfg.Bind,
 		tlsAddr:        cfg.BindTLS,
+		doqAddr:        cfg.BindSDoQ,
 		dohAddr:        cfg.BindDOH,
 		tlsCertificate: cfg.TLSCertificate,
 		tlsPrivateKey:  cfg.TLSPrivateKey,
@@ -103,7 +105,7 @@ func (s *Server) Run() {
 // ListenAndServeDNS Starts a server on address and network specified Invoke handler
 // for incoming queries.
 func (s *Server) ListenAndServeDNS(proto string) {
-	log.Info("DNS server listening...", "proto", proto, "addr", s.addr)
+	log.Info("DNS server listening...", "proto", proto, "addr", s.doqAddr)
 
 	var (
 		reuseport = true
@@ -113,13 +115,13 @@ func (s *Server) ListenAndServeDNS(proto string) {
 		addr      string
 	)
 	if proto == "scion" {
-		pconn, err = ListenSQUICPacket(s.addr)
+		pconn, err = ListenSQUICPacket(s.doqAddr)
 		if err != nil {
-			log.Error("DNS listener failed", "proto", proto, "addr", s.addr, "error", err.Error())
+			log.Error("DNS listener failed", "proto", proto, "addr", s.doqAddr, "error", err.Error())
 		}
 
 		net = "squic"
-		addr = s.addr
+		addr = s.doqAddr
 		reuseport = true
 	} else {
 		net = proto
