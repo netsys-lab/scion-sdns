@@ -89,7 +89,7 @@ type AuthServers struct {
 	Checked         bool
 }
 
-// Sort sort servers by rtt
+// Sort sort servers first by version (scion-quic > ipv6>ipv4) then by rtt
 func Sort(serversList []*AuthServer, called uint64) {
 	for _, s := range serversList {
 		//clear stats and re-start again
@@ -110,6 +110,18 @@ func Sort(serversList []*AuthServer, called uint64) {
 		}
 	}
 	sort.Slice(serversList, func(i, j int) bool {
-		return atomic.LoadInt64(&serversList[i].Rtt) < atomic.LoadInt64(&serversList[j].Rtt)
+
+		// higher version is better (ipv4<ipv6<scion_squic) and must compare less
+		// in order for scion nameservers to preceede legacy ones
+		versionLess := serversList[i].Version > serversList[j].Version
+		sameversion := serversList[i].Version == serversList[j].Version
+
+		if sameversion {
+			rttLess := atomic.LoadInt64(&serversList[i].Rtt) < atomic.LoadInt64(&serversList[j].Rtt)
+			return rttLess
+		} else {
+			return versionLess
+		}
+
 	})
 }
