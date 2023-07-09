@@ -86,9 +86,10 @@ require (
 	inet.af/netaddr v0.0.0-20230525184311-b8eac61e914a // indirect
 )
 
-replace github.com/miekg/dns v1.1.54 => github.com/loujie1/dns v1.1.51
+//replace github.com/miekg/dns v1.1.54 => github.com/loujie1/dns v1.1.51
 
-replace github.com/loujie1/dns v1.1.51 => ../loujie1-dns
+//replace github.com/loujie1/dns v1.1.51 => ../luki-loujie-dns
+replace github.com/miekg/dns v1.1.54 => ../luki-loujie-dns
 
 go 1.20
 

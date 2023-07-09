@@ -3,14 +3,17 @@ package resolver
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"math/rand"
 	"net"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/netsec-ethz/scion-apps/pkg/pan"
 	"github.com/semihalev/log"
 )
 
@@ -53,6 +56,9 @@ func shuffleStr(vals []string) []string {
 	return ret
 }
 
+/*
+search the response msg's Answer section and return any addresses A,AAAA, TXT from it
+*/
 func searchAddrs(msg *dns.Msg) (addrs []string, found bool) {
 	found = false
 
@@ -87,6 +93,14 @@ func searchAddrs(msg *dns.Msg) (addrs []string, found bool) {
 
 			addrs = append(addrs, r.AAAA.String())
 			found = true
+		} else if r, ok := rr.(*dns.TXT); ok {
+			///if saddr := SCIONAddrFromString(strings.Join(r.Txt), ""); saddr != "" {		}
+			//}
+
+			if saddr, okk := parseTXTasSCIONAddr(r); okk {
+				addrs = append(addrs, saddr)
+				found = true
+			}
 		}
 	}
 
@@ -125,6 +139,15 @@ func getIPAddressFromScionTXT(txt *dns.TXT) net.IP {
 	return addr
 }
 
+/*
+	 takes a TXT record with a scion address like:
+		; dummy domain
+		dummy    IN   TXT 'scion=19-ffaa:1:1067,127.0.0.2'
+
+		and returns the contained scion address without the scion= prefix
+
+		If the TXT-RR has no 'scion=' prefix, we double check whether its not a scion address after all
+*/
 func parseTXTasSCIONAddr(txt *dns.TXT) (addr string, ok bool) {
 	content := strings.Join(txt.Txt, "")
 	keyvalue := strings.Split(content, "=")
@@ -134,8 +157,61 @@ func parseTXTasSCIONAddr(txt *dns.TXT) (addr string, ok bool) {
 			addr = tokens[0] + "[" + tokens[1] + "]"
 			ok = true
 		}
+	} else {
+		scadd := SCIONAddrFromString(content)
+		if _, k := pan.ParseUDPAddr(scadd); k == nil {
+			return scadd, true
+			// return ad.String() // that is somehow broken: 19-ffaa:1:1067,[127.0.0.1]:10000 becomes 19-ffaa:1:1067,127.0.0.1:10000
+		} else {
+			return
+		}
 	}
 	return
+}
+
+func HasPort(addr string) bool {
+	addrRegexp := regexp.MustCompile(`(?P<isia>\d+-[\d:A-Fa-f]+,[\d.:\[\]a-z]+):(?P<port>\d+)`)
+
+	match := addrRegexp.FindStringSubmatch(addr)
+
+	return len(match) == 2
+
+}
+
+func WithPortIfNotSet(addr string, port int) string {
+	addrRegexp := regexp.MustCompile(`(?P<isia>\d+-[\d:A-Fa-f]+,[\d.:\[\]a-z]+):(?P<port>\d+)`)
+
+	match := addrRegexp.FindStringSubmatch(addr)
+
+	if len(match) == 3 {
+		// address already has port
+		return match[0]
+	}
+	return match[1] + ":" + fmt.Sprint(port)
+}
+
+/*
+extract a SCION address from a string i.E.:
+"'19-ffaa:1:1094,[127.0.0.1]'" => "19-ffaa:1.1094,[127.0.0.1]"
+
+"scion=19-ffaa:1:1067,[127.0.0.1]" => 19-ffaa:1:1067,[127.0.0.1]
+return empty-string if not found
+*/
+func SCIONAddrFromString(addr string) string {
+	addrRegexp := regexp.MustCompile(`(?P<ia>\d+-[\d:A-Fa-f]+),(?P<host>[\d.:\[\]a-z]+)`)
+
+	match := addrRegexp.FindStringSubmatch(addr)
+	if len(match) != 3 {
+		return "" // serrors.New("invalid address: regex match failed", "addr", s)
+	}
+	left, right := strings.Count(addr, "["), strings.Count(addr, "]")
+	if left != right {
+		return "" // serrors.New("invalid address: bracket count mismatch", "addr", s)
+	}
+	if strings.HasSuffix(match[2], ":") {
+		return "" // ,  serrors.New("invalid address: trailing ':'", "addr", s)
+	}
+	return match[1] + "," + match[2]
 }
 
 func parseIPv4(s string) net.IP {
@@ -375,13 +451,20 @@ func checkExponent(key string) bool {
 	return true
 }
 
+/*
+sorts the nameservers descendingly according to how many labels they have in common with the Qname
+example: given two Ns  ns1.dummy.example.org.  ns.example.org. and a qname test.dummy.example.org.
+
+	the snd Ns will preceede the fst as it has 2 label in common with the qname, whereas the fst has 3
+*/
 func sortnss(nss nameservers, qname string) []string {
-	var list []string
+	var list []string // contains the keys of nameservers map
 	for name := range nss {
 		list = append(list, name)
 	}
 
 	sort.Strings(list)
+	// nameservers sorted lexicogryphically, so that shorter ones preceede longer ones
 	sort.Slice(list, func(i, j int) bool {
 		return dns.CompareDomainName(qname, list[i]) < dns.CompareDomainName(qname, list[j])
 	})
@@ -389,6 +472,29 @@ func sortnss(nss nameservers, qname string) []string {
 	return list
 }
 
+/*
+Alias for a name and all its subnames, unlike CNAME, which is an alias for only the exact name.
+Like a CNAME record, the DNS lookup will continue by retrying the lookup with the new name.
+
+A DNAME record or Delegation Name record is defined by RFC 6672 (original RFC 2672 is now obsolete). A DNAME record creates an alias for an entire subtree of the domain name tree. In contrast, the CNAME record creates an alias for a single name and not its subdomains. Like the CNAME record, the DNS lookup will continue by retrying the lookup with the new name. The name server synthesizes a CNAME record to actually apply the DNAME record to the requested name—CNAMEs for every node on a subtree have the same effect as a DNAME for the entire subtree.
+
+For example, if there is a DNS zone as follows:
+
+foo.example.com.        DNAME  bar.example.com.
+bar.example.com.        A      192.0.2.23
+xyzzy.bar.example.com.  A      192.0.2.24
+*.bar.example.com.      A      192.0.2.25
+An A record lookup for foo.example.com will return no data because a DNAME is not a CNAME and there is no A record directly at foo.
+
+However, a lookup for xyzzy.foo.example.com will be DNAME mapped and return the A record for xyzzy.bar.example.com, which is 192.0.2.24;
+if the DNAME record had been a CNAME record, this request would have returned name not found.
+
+Lastly, a request for foobar.foo.example.com would be DNAME mapped and return 192.0.2.25.
+
+\brief gets the target domain where the question in msg is eventually delegated to,
+
+	if its Answer section contains a DNAME RR that is relevant for the question
+*/
 func getDnameTarget(msg *dns.Msg) string {
 	var target string
 
@@ -396,12 +502,46 @@ func getDnameTarget(msg *dns.Msg) string {
 
 	for _, r := range msg.Answer {
 		if dname, ok := r.(*dns.DNAME); ok {
-			if n := dns.CompareDomainName(dname.Header().Name, q.Name); n > 0 {
+			delegateFrom := dname.Header().Name // domain name that is delegated
+			// check if the query is affected by the delegation (query )
+			if n := dns.CompareDomainName(delegateFrom, q.Name); n > 0 {
 				labels := dns.CountLabel(q.Name)
 
 				if n == labels {
+					// question matches the delegateFrom-domain exactly (it holds delegateFrom==q.Name)
 					target = dname.Target
 				} else {
+					// question is only partially affected (the last 'n' labels are delegated, and replaced by target)
+					prev, _ := dns.PrevLabel(q.Name, n)
+					target = q.Name[:prev] + dname.Target
+				}
+			}
+
+			return target
+		}
+	}
+
+	return target
+}
+
+/*
+q must be an element of msg.Question
+*/
+func getDnameTargetForQuestion(msg *dns.Msg, q dns.Question) string {
+	var target string
+
+	for _, r := range msg.Answer {
+		if dname, ok := r.(*dns.DNAME); ok {
+			delegateFrom := dname.Header().Name // domain name that is delegated
+			// check if the query is affected by the delegation (query )
+			if n := dns.CompareDomainName(delegateFrom, q.Name); n > 0 {
+				labels := dns.CountLabel(q.Name)
+
+				if n == labels {
+					// question matches the delegateFrom-domain exactly (it holds delegateFrom==q.Name)
+					target = dname.Target
+				} else {
+					// question is only partially affected (the last 'n' labels are delegated, and replaced by target)
 					prev, _ := dns.PrevLabel(q.Name, n)
 					target = q.Name[:prev] + dname.Target
 				}
