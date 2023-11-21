@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -11,13 +12,15 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/netsys-lab/sqnet"
+	"github.com/netsec-ethz/scion-apps/pkg/pan"
+	"github.com/quic-go/quic-go"
 	"github.com/semihalev/log"
 	"github.com/semihalev/sdns/authcache"
 	"github.com/semihalev/sdns/cache"
 	"github.com/semihalev/sdns/config"
 	"github.com/semihalev/sdns/dnsutil"
 	"github.com/semihalev/sdns/middleware"
+	"inet.af/netaddr"
 )
 
 // Resolver type
@@ -30,6 +33,7 @@ type Resolver struct {
 
 	outboundipv4 []net.IP
 	outboundipv6 []net.IP
+	tlsConfig    *tls.Config // needed for DoQ
 
 	// glue addrs cache
 	ipv4cache  *cache.Cache
@@ -56,6 +60,7 @@ var (
 )
 
 const (
+	SDoQPort         = 853 // port for DNS-over-QUIC (DoQ)
 	rootzone         = "."
 	maxUint16        = 1 << 16
 	defaultCacheSize = 1024 * 256
@@ -64,12 +69,41 @@ const (
 
 // NewResolver return a resolver
 func NewResolver(cfg *config.Config) *Resolver {
+
+	/*var cert tls.Certificate
+	var err error
+	cert, err = tls.LoadX509KeyPair(cfg.TLSCertificate, cfg.TLSPrivateKey)
+	if err != nil {
+		log.Error("failed to load Cert Files")
+		//return nil
+		//Cert is only required for Client Auth
+	}
+	*/
+
 	r := &Resolver{
 		cfg: cfg,
 
 		ncache: authcache.NewNSCache(),
 
 		rootservers: new(authcache.AuthServers),
+		tlsConfig: &tls.Config{
+			// Certificates: []tls.Certificate{cert},
+			NextProtos: []string{"doq", "dq", "doq-i00", "doq-i02"},
+			ClientAuth: tls.NoClientCert,
+			MinVersion: tls.VersionTLS12,
+			MaxVersion: tls.VersionTLS13,
+			CipherSuites: []uint16{
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			},
+		},
 
 		ipv4cache:  cache.New(defaultCacheSize),
 		ipv6cache:  cache.New(defaultCacheSize),
@@ -148,12 +182,26 @@ func (r *Resolver) parseOutBoundAddrs(cfg *config.Config) {
 }
 
 // Resolve iterate recursively over the domains
+/*
+
+\param root .. is only true for the first/initial/primary call to Resolve. Any subsequent recursive calls will have it set to false
+				At the moment it only influences if a cache lookup is done for the qname
+
+\param level .. starts at 0 with the initial call and increases with each recursive call
+
+\param depth
+
+\param nomin  No QueryMinimization ?!
+*/
 func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache.AuthServers, root bool, depth int, level int, nomin bool, parentdsrr []dns.RR, extra ...bool) (*dns.Msg, error) {
 	q := req.Question[0]
 
+	// if we find the authoritative nameservers for the question in cache, we dont need any recursive callls up to 'level'
 	if root {
 		servers, parentdsrr, level = r.searchCache(q, req.CheckingDisabled, q.Name)
 	}
+
+	// we ended up here, which means no luck with cache lookup
 
 	// RFC 7816 query minimization. There are some concerns in RFC.
 	// Current default minimize level 5, if we down to level 3, performance gain 20%
@@ -163,6 +211,8 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 
 	resp, err := r.groupLookup(ctx, minReq, servers)
 	//log.Debug("Resolve", "ctx", ctx, "minReq", minReq, "servers", servers, "resp", resp, "err", err)
+
+	// handle the worst case -> any non dns related 'real' network errors
 	if err != nil {
 		if minimized {
 			// return without minimized
@@ -188,35 +238,73 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 
 	resp = r.setTags(req, resp)
 
+	// branch 01 we weren't succesful, got no answer (and no referrals  ?! )
 	if resp.Rcode != dns.RcodeSuccess && len(resp.Answer) == 0 && len(resp.Ns) == 0 {
+		// the non-successful Rcode could be due to us asking to little
+		// (level to low and thus domain-name to few labels ) ?!
+		// try again asking one level more
 		if minimized {
 			level++
+			// why not minReq here instead of req ??
 			return r.Resolve(ctx, req, servers, false, depth, level, nomin, parentdsrr)
 		}
 		return resp, nil
 	}
+	// assert 01 (negation of branch01 condition)
+	if !(resp.Rcode == dns.RcodeSuccess || len(resp.Answer) > 0 || len(resp.Ns) > 0) {
+		panic("my logic is wrong")
+	}
 
+	/* we were successfully referred ?!
+	got at least one Answer and (either dns.RcodeSuccess
+	or at least one Nameserver) otherwise first branch would have been taken
+	(if we got nameserver or not doesnt matter here ?!)*/
+	// branch 02
 	if !minimized && len(resp.Answer) > 0 {
 		// this is like auth server external cname error but this can be recover.
 		if resp.Rcode == dns.RcodeServerFailure && len(resp.Answer) > 0 {
 			resp.Rcode = dns.RcodeSuccess
 		}
-
+		// why dnssec verification only on NameError ?!
 		if resp.Rcode == dns.RcodeNameError {
-			return r.authority(ctx, req, resp, parentdsrr, req.Question[0].Qtype)
+			return r.authority(ctx, req, resp, parentdsrr, req.Question[0].Qtype) // TODO make multi-question capabale
 		}
 
 		return r.answer(ctx, req, resp, parentdsrr, extra...)
 	}
-
+	// assert 02 (negation of both branch01 &02)
+	if !(minimized && resp.Rcode == dns.RcodeSuccess ||
+		len(resp.Answer) > 0 && minimized ||
+		len(resp.Ns) > 0 && minimized ||
+		resp.Rcode == dns.RcodeSuccess && len(resp.Answer) == 0 ||
+		len(resp.Ns) > 0 && len(resp.Answer) == 0) {
+		panic("logic error")
+	}
+	// branch 03
 	if minimized && (len(resp.Answer) == 0 && len(resp.Ns) == 0) || len(resp.Answer) > 0 {
 		level++
+		/// why not minReq here ?
 		return r.Resolve(ctx, req, servers, false, depth, level, nomin, parentdsrr)
 	}
 
+	// assert 03
+	if !(len(resp.Ns) > 0 && len(resp.Answer) == 0 && minimized && resp.Rcode == dns.RcodeSuccess ||
+		len(resp.Ns) > 0 && len(resp.Answer) == 0 && minimized ||
+		len(resp.Ns) > 0 && len(resp.Answer) == 0) {
+		panic("my logic sucks")
+	}
+
 	if len(resp.Ns) > 0 {
+
 		if minimized {
+			// failed
+			//	if !(len(req.Ns) > 0 && len(req.Answer) == 0) {
+			//		panic("my logic is wrong")
+			//	}
 			for _, rr := range resp.Ns {
+				if !(len(req.Answer) == 0) {
+					panic("my logic is wrong")
+				}
 				if _, ok := rr.(*dns.SOA); ok {
 					level++
 					return r.Resolve(ctx, req, servers, false, depth, level, nomin, parentdsrr)
@@ -311,8 +399,9 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 
 		nlevel := dns.CountLabel(q.Name)
 		if level > nlevel {
+			// overshoot detected. Any further recursion is pointless here
 			if r.qnameMinLevel > 0 && !nomin {
-				//try without minimization
+				//try without minimization again (set level back to 0)
 				return r.Resolve(ctx, req, r.rootservers, true, depth, 0, true, nil, extra...)
 			}
 			return resp, errParentDetection
@@ -372,7 +461,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		go r.lookupV6Nss(v6ctx, q, authservers, key, parentdsrr, foundv6, nss, cd)
 
 		scionctx := context.WithValue(context.Background(), ctxKey("reqid"), reqid)
-		go r.lookupV6Nss(scionctx, q, authservers, key, parentdsrr, foundscion, nss, cd)
+		go r.lookupSCIONNss(scionctx, q, authservers, key, parentdsrr, foundscion, nss, cd)
 
 		depth--
 
@@ -381,6 +470,10 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		}
 
 		return r.Resolve(ctx, req, authservers, false, depth, nlevel, nomin, parentdsrr)
+	}
+
+	if !(!minimized && len(req.Answer) == 0) {
+		panic("my logic is wrong")
 	}
 
 	// no answer, no authority. create new msg safer, sometimes received weird responses
@@ -435,12 +528,19 @@ func (r *Resolver) checkLoop(ctx context.Context, qname string, qtype uint16) (c
 	return ctx, false
 }
 
+/*
+\param key
+\param foundv4  the nameservers that we already have an IPv4 address for
+\param nss .. the nameservers we use to retrive further Ns that are more specific to the qname ?!
+\param[out] authservers
+*/
 func (r *Resolver) lookupV4Nss(ctx context.Context, q dns.Question, authservers *authcache.AuthServers, key uint64, parentdsrr []dns.RR, foundv4, nss nameservers, cd bool) {
 	list := sortnss(nss, q.Name)
-
+	// try the nameservery from least specific regarding the qname to more specific (in terms of labels in common)
 	for _, name := range list {
 		authservers.Nss = append(authservers.Nss, name)
 
+		// we already have this nameservers address, no need to look it up again
 		if _, ok := foundv4[name]; ok {
 			continue
 		}
@@ -474,8 +574,14 @@ func (r *Resolver) lookupV4Nss(ctx context.Context, q dns.Question, authservers 
 
 		authservers.Lock()
 	addrsloop:
+		// store the nameserver name's addresses we just retrieved into the authservers.List
+		//
 		for _, addr := range addrs {
-			raddr := net.JoinHostPort(addr, "53")
+			raddr := net.JoinHostPort(addr, "53") // TODO: this could be an ipv6 or even scion address ^^
+			// here a switch statement is needed,
+			// we cant just assume authcache.IPv4 but need to find out its actual type
+
+			// check if this address is not even already present(we dont want duplicates)
 			for _, s := range authservers.List {
 				if s.Addr == raddr {
 					continue addrsloop
@@ -574,7 +680,7 @@ func (r *Resolver) lookupSCIONNss(ctx context.Context, q dns.Question, authserve
 	addrsloop:
 		for _, addr := range addrs {
 			//TODO maybe use pan.MangleSCIONAddr or something
-			raddr := addr + ":53"
+			raddr := WithPortIfNotSet(addr, SDoQPort)
 			for _, s := range authservers.List {
 				if s.Addr == raddr {
 					continue addrsloop
@@ -672,8 +778,7 @@ addrsloopv6:
 
 addrsloopscion:
 	for _, addr := range raddrsscion {
-		// TODO no scion equivalent of JoinHostPort yet
-		raddr := addr + ":53"
+		raddr := WithPortIfNotSet(addr, SDoQPort)
 		for _, s := range servers.List {
 			if s.Addr == raddr {
 				continue addrsloopscion
@@ -687,6 +792,14 @@ addrsloopscion:
 	return oldsize != len(servers.List)
 }
 
+/*
+this method combs the Extra section of the received response resp
+for any glue records such as A, AAAA, or TXT
+
+\param resp
+\param nss
+\param level
+*/
 func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*authcache.AuthServers, nameservers, nameservers, nameservers) {
 	authservers := &authcache.AuthServers{}
 
@@ -699,8 +812,8 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 
 	for _, a := range resp.Extra {
 		if extra, ok := a.(*dns.TXT); ok {
-
-			name := strings.ToLower(extra.Header().Name)
+			//var d dns.RR_Header
+			name := strings.ToLower(extra.Header().Name) // name of nameserver (can be longer than qname )
 			qname := resp.Question[0].Name
 
 			i, _ := dns.PrevLabel(qname, level)
@@ -719,7 +832,7 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 				foundscion[name] = struct{}{}
 				nsscion[name] = append(nsscion[name], addr)
 
-				authservers.List = append(authservers.List, authcache.NewAuthServer(addr+":53", authcache.QUIC_SCION))
+				authservers.List = append(authservers.List, authcache.NewAuthServer(addr+":53", authcache.QUIC_SCION)) // use SDoQPort here
 			}
 		}
 	}
@@ -727,7 +840,7 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 	nsipv6 := make(map[string][]string)
 	for _, a := range resp.Extra {
 		if extra, ok := a.(*dns.AAAA); ok {
-			name := strings.ToLower(extra.Header().Name)
+			name := strings.ToLower(extra.Header().Name) // nameserver name (can be longer than qname i.e. d0.org.afilias-nst.org. as Nameserver for org.)
 			qname := resp.Question[0].Name
 
 			i, _ := dns.PrevLabel(qname, level)
@@ -757,7 +870,7 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 	nsipv4 := make(map[string][]string)
 	for _, a := range resp.Extra {
 		if extra, ok := a.(*dns.A); ok {
-			name := strings.ToLower(extra.Header().Name)
+			name := strings.ToLower(extra.Header().Name) // domain name of nameserver (can be longer than qname)
 			qname := resp.Question[0].Name
 
 			i, _ := dns.PrevLabel(qname, level)
@@ -878,6 +991,8 @@ func (r *Resolver) minimize(req *dns.Msg, level int, nomin bool) (*dns.Msg, bool
 	return minReq, minimized
 }
 
+// Why is this a method on resolver, if its not used
+// TODO make free function of it
 func (r *Resolver) setTags(req, resp *dns.Msg) *dns.Msg {
 	resp.RecursionAvailable = true
 	resp.RecursionDesired = true
@@ -917,6 +1032,12 @@ func (r *Resolver) checkDname(ctx context.Context, resp *dns.Msg) (*dns.Msg, boo
 	return nil, false
 }
 
+/*
+process any DNAME records in the answer section of resp.
+If a question is delegated by DNAME restart resolution of the new target domain name.
+
+\param parentdsrr DS Resource Records of the parents. Used only for DNSSEC verification in authority()
+*/
 func (r *Resolver) answer(ctx context.Context, req, resp *dns.Msg, parentdsrr []dns.RR, extra ...bool) (*dns.Msg, error) {
 	if msg, ok := r.checkDname(ctx, resp); ok {
 		resp.Answer = append(resp.Answer, msg.Answer...)
@@ -958,6 +1079,8 @@ func (r *Resolver) answer(ctx context.Context, req, resp *dns.Msg, parentdsrr []
 	return resp, nil
 }
 
+/* do DNSSEC verification if CheckingDisabled not set in request req
+ */
 func (r *Resolver) authority(ctx context.Context, req, resp *dns.Msg, parentdsrr []dns.RR, otype uint16) (*dns.Msg, error) {
 	//if !req.CheckingDisabled {
 	//	var err error
@@ -1057,6 +1180,8 @@ func (r *Resolver) lookup(ctx context.Context, req *dns.Msg, servers *authcache.
 
 	startRacer := func(ctx context.Context, req *dns.Msg, server *authcache.AuthServer) {
 		resp, err := r.exchange(ctx, "udp", req, server, 0)
+		// dont be confused by the 'udp' proto,
+		// whats important is the server's Version field, which is QUIC_SCION eventually
 		defer ReleaseMsg(req)
 
 		select {
@@ -1164,6 +1289,11 @@ mainloop:
 	panic("looks like no root servers, check your config")
 }
 
+/*
+	the proto field is not used if server-version is SCION_QUIC
+
+dont be confused
+*/
 func (r *Resolver) exchange(ctx context.Context, proto string, req *dns.Msg, server *authcache.AuthServer, retried int) (*dns.Msg, error) {
 	q := req.Question[0]
 
@@ -1176,12 +1306,60 @@ func (r *Resolver) exchange(ctx context.Context, proto string, req *dns.Msg, ser
 		atomic.AddInt64(&server.Count, 1)
 	}()
 
+	/*
+		TODO: its bad to use a separate connection for each exchange!
+		This way we can never benefit from QUIC's session resumption capability.
+
+		The resolver needs a session cache ?! or is this already covered by the quic-go impl
+	*/
 	co := AcquireConn()
 	defer ReleaseConn(co) // this will be close conn also
 
 	if server.Version == authcache.QUIC_SCION {
 		log.Debug("Dialing SCION", "addr", server.Addr)
-		co.Conn, err = sqnet.DialContextString(ctx, server.Addr)
+		//co.Conn, err = sqnet.DialContextString(ctx, server.Addr)
+		//co.Conn, err = sqnet.DialString(server.Addr) // -> DialQUIC in the end
+
+		var local netaddr.IPPort
+
+		if len := len(r.cfg.OutboundIPs); len > 0 {
+			// loop until we have at least one suitable outboundIP address
+			for i := 0; i < len; i++ {
+				var outAddr string = r.cfg.OutboundIPs[i]
+				local, err = netaddr.ParseIPPort(outAddr)
+				if err != nil {
+					fmt.Printf("invalid outboundIPv4 address: %v \n", outAddr)
+				} else {
+					//	fmt.Printf("outip: %v\n", outAddr)
+					// exit loop, we have what we need
+					break
+				}
+			}
+		}
+
+		var hostForSNI string = "localhost"
+		// NOTE: adguard/dnsproxy uses the Host part of the remote server URL here
+		// hacky shortcut, because i know what domain-name my server's certificate is issued on ( that is 'localhost' amongst others)
+		// this has to be the domain name of the nameserver we are about to dial
+		// It is required for the crypto handshake to succeed.
+		// For production, we have to look this up with 'Reverse DNS Lookup (rDNS)' of the servers ('remote') IP address through one of the other bootstrap/root-servers
+		// TODO: create Method func hostSNIFromAddr( serverAddrToReverseLookup string, cfg *config.Config ) ( serverSNIToAddress string, error)
+
+		var remote pan.UDPAddr
+		remote, err = pan.ParseUDPAddr(server.Addr)
+		if err != nil {
+			fmt.Printf("parse of pan.UPDAddr failed with: %v in resolver \n", server.Addr)
+		}
+		local = netaddr.IPPort{}
+		co.quicEarlySession, err = pan.DialQUICEarly(ctx, local, remote, nil, nil, hostForSNI, r.tlsConfig, &quic.Config{MaxIdleTimeout: 5 * time.Minute})
+		//co.Conn, err = pan.DialQUICEarly(ctx, local, remote, nil, nil, hostForSNI, r.tlsConfig, &quic.Config{MaxIdleTimeout: 5 * time.Minute}) // does not impl net.Conn because no Close()
+
+		//test, err := pan.DialQUIC(ctx, local, remote, nil, nil, hostForSNI, r.tlsConfig, &quic.Config{MaxIdleTimeout: 5 * time.Minute})
+		//co.Conn = *test // no net.Conn, because no close()
+
+		if err != nil {
+			fmt.Printf("dialQUIC failed in resolver: %v \n", err.Error())
+		}
 	} else {
 		log.Debug(fmt.Sprintf("Dialing %s", proto), "addr", server.Addr)
 		d := r.newDialer(ctx, proto, server.Version)
@@ -1193,8 +1371,9 @@ func (r *Resolver) exchange(ctx context.Context, proto string, req *dns.Msg, ser
 			"net", proto, "rtt", rtt.Round(time.Millisecond).String(), "error", err.Error(), "retried", retried)
 		return nil, err
 	}
-
-	_ = co.SetDeadline(time.Now().Add(r.netTimeout))
+	if server.Version != authcache.QUIC_SCION {
+		_ = co.SetDeadline(time.Now().Add(r.netTimeout))
+	}
 
 	resp, rtt, err = co.Exchange(req)
 	if err != nil {
@@ -1213,7 +1392,8 @@ func (r *Resolver) exchange(ctx context.Context, proto string, req *dns.Msg, ser
 		return nil, err
 	}
 
-	if resp != nil && resp.Truncated && proto == "udp" {
+	if resp != nil && resp.Truncated && proto == "udp" && server.Version != authcache.QUIC_SCION {
+		fmt.Printf("received truncated response from: %v proto: %v\n", server.Addr, proto)
 		return r.exchange(ctx, "tcp", req, server, retried)
 	}
 
@@ -1262,6 +1442,11 @@ func (r *Resolver) newDialer(ctx context.Context, proto string, version authcach
 	return d
 }
 
+/*
+\param cd .. CheckingDisabled
+
+level is CompareDomainName(origin,q.Name)
+*/
 func (r *Resolver) searchCache(q dns.Question, cd bool, origin string) (servers *authcache.AuthServers, parentdsrr []dns.RR, level int) {
 	if q.Qtype == dns.TypeDS {
 		next, end := dns.NextLabel(q.Name, 0)
@@ -1409,6 +1594,11 @@ func (r *Resolver) lookupDS(ctx context.Context, qname string) (msg *dns.Msg, er
 	return dsres, nil
 }
 
+/*
+\brief retrieve the IPv4 address for a nameserver with domain-name 'qname'
+\details creates a query for 'qname' with Qtype A and exchanges it internally.
+\param qname  .. the domain-name of a nameserver that we got from a response's Nss section and now want to dial
+*/
 func (r *Resolver) lookupNSAddrV4(ctx context.Context, qname string, cd bool) (addrs []string, err error) {
 	log.Debug("Lookup NS ipv4 address", "qname", qname)
 
@@ -1428,6 +1618,7 @@ func (r *Resolver) lookupNSAddrV4(ctx context.Context, qname string, cd bool) (a
 		return addrs, fmt.Errorf("nameserver ipv4 address lookup failed for %s (%v)", qname, err)
 	}
 
+	// return any A,AAAA,TXT records from the response's answer section
 	if addrs, ok := searchAddrs(nsres); ok {
 		return addrs, nil
 	}
@@ -1471,6 +1662,9 @@ func (r *Resolver) lookupNSAddrV6(ctx context.Context, qname string, cd bool) (a
 	return addrs, fmt.Errorf("nameserver ipv6 address lookup failed for %s", qname)
 }
 
+/*
+return SCION addresses for the Nameserver authoritative for qname ?!
+*/
 func (r *Resolver) lookupNSAddrSCION(ctx context.Context, qname string, cd bool) (addrs []string, err error) {
 	log.Debug("Lookup NS SCION address", "qname", qname)
 
@@ -1628,6 +1822,9 @@ func (r *Resolver) verifyDNSSEC(ctx context.Context, signer, signed string, resp
 	return true, nil
 }
 
+/*
+keep only DNSKEY, OPT, TXT, RRSIG Records in answer section. Remove any others
+*/
 func (r *Resolver) clearAdditional(req, resp *dns.Msg, extra ...bool) *dns.Msg {
 	resp.Ns = []dns.RR{}
 
@@ -1680,6 +1877,9 @@ func (r *Resolver) equalServers(s1, s2 *authcache.AuthServers) bool {
 	return true
 }
 
+/*
+querys the configured rootservers for ". IN NS" (rootserver update)
+*/
 func (r *Resolver) checkPriming() {
 	req := new(dns.Msg)
 	req.SetQuestion(rootzone, dns.TypeNS)
@@ -1727,7 +1927,8 @@ func (r *Resolver) checkPriming() {
 				if txt, ok := r.(*dns.TXT); ok {
 					addr, ok := parseTXTasSCIONAddr(txt)
 					if ok {
-						tmpservers.List = append(tmpservers.List, authcache.NewAuthServer(addr+":53", authcache.QUIC_SCION))
+
+						tmpservers.List = append(tmpservers.List, authcache.NewAuthServer(WithPortIfNotSet(addr, SDoQPort), authcache.QUIC_SCION))
 					}
 				}
 			}

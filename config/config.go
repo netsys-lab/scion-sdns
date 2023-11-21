@@ -17,6 +17,7 @@ import (
 
 const configver = "1.2.0"
 
+// Field names have to fullfil strings.EqualFold() predicate with their corresponding key in the conf file !!
 // Config type
 type Config struct {
 	Version           string
@@ -32,6 +33,7 @@ type Config struct {
 	LogLevel          string
 	AccessLog         string
 	Bind              string
+	BindSDoQ          string
 	BindTLS           string
 	BindDOH           string
 	TLSCertificate    string
