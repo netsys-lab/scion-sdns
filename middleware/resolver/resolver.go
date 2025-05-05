@@ -43,8 +43,9 @@ type Resolver struct {
 	delegCache *cache.Cache
 	rootkeys   []dns.RR
 
-	qnameMinLevel int
-	netTimeout    time.Duration
+	qnameMinLevel           int
+	netTimeout              time.Duration
+	lookupSCIONAddressEager bool // if set, the resolver will try to find a SCION Address for every nameserver, even though it might already have an IP
 
 	group singleflight
 }
@@ -109,8 +110,9 @@ func NewResolver(cfg *config.Config) *Resolver {
 		ipv6cache:  cache.New(defaultCacheSize),
 		scioncache: cache.New(defaultCacheSize),
 
-		qnameMinLevel: cfg.QnameMinLevel,
-		netTimeout:    defaultTimeout,
+		qnameMinLevel:           cfg.QnameMinLevel,
+		netTimeout:              defaultTimeout,
+		lookupSCIONAddressEager: true, // enforce scion doq dns privacy as much as possible
 	}
 
 	if r.cfg.Timeout.Duration > 0 {
@@ -320,7 +322,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		var nsrr *dns.NS
 
 		soa := false
-		nss := make(nameservers)
+		nss := make(nameservers) // domain-names of nameservers authoritative for the qname in 'minReq'
 		for _, rr := range resp.Ns {
 			if _, ok := rr.(*dns.SOA); ok {
 				soa = true
@@ -348,7 +350,8 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 			}
 			return r.authority(ctx, minReq, resp, parentdsrr, q.Qtype)
 		}
-
+		// this question asks for other Nameservers authoritative for the same zone(nsrr.Header().Name)
+		// as the one from the Ns section, that we already have ?!
 		q = dns.Question{Name: nsrr.Header().Name, Qtype: nsrr.Header().Rrtype, Qclass: nsrr.Header().Class}
 		// TODO DNSSEC verification removed
 		//signer, signerFound := r.findRRSIG(resp, q.Name, false)
@@ -435,12 +438,18 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 
 		log.Debug("Nameserver cache not found", "key", key, "query", formatQuestion(q), "cd", cd)
 
-		authservers, foundv4, foundv6, foundscion := r.checkGlueRR(resp, nss, level)
-		log.Debug("CheckGlueRR", "authservers", authservers, "foundv4", foundv4, "foundv6", foundv6, "foundscion", foundscion)
+		// authservers, foundv4, foundv6, foundscion := r.checkGlueRR(resp, nss, level)
+
+		authservers, stats := r.checkANYGlueRR(resp, nss, level) // check that this contains same as foundXY
+
+		//log.Debug("CheckGlueRR", "authservers", authservers, "foundv4", foundv4, "foundv6", foundv6, "foundscion", foundscion)
 		authservers.CheckingDisable = cd
 		authservers.Zone = q.Name
 
-		r.lookupV4Nss(ctx, q, authservers, key, parentdsrr, foundv4, nss, cd)
+		// if for whatever reason there was no GlueRecord with an Address for any of the nameservers in 'nss'
+		// look it up
+		//r.lookupV4Nss(ctx, q, authservers, key, parentdsrr, foundv4, nss, cd)
+		r.lookupANYNss(ctx, q, authservers, key, parentdsrr, stats, nss, cd)
 
 		if len(authservers.List) == 0 {
 			if minimized && level < nlevel {
@@ -453,7 +462,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 
 		r.ncache.Set(key, parentdsrr, authservers, time.Duration(nsrr.Header().Ttl)*time.Second)
 		log.Debug("Nameserver cache insert", "key", key, "query", formatQuestion(q), "cd", cd)
-
+		/* not needed anymore ?! as already  done by lookupANYNss
 		//copy reqid
 		reqid := ctx.Value(ctxKey("reqid"))
 		v6ctx := context.WithValue(context.Background(), ctxKey("reqid"), reqid)
@@ -463,6 +472,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		scionctx := context.WithValue(context.Background(), ctxKey("reqid"), reqid)
 		go r.lookupSCIONNss(scionctx, q, authservers, key, parentdsrr, foundscion, nss, cd)
 
+		*/
 		depth--
 
 		if depth <= 0 {
@@ -529,9 +539,110 @@ func (r *Resolver) checkLoop(ctx context.Context, qname string, qtype uint16) (c
 }
 
 /*
-\param key
-\param foundv4  the nameservers that we already have an IPv4 address for
-\param nss .. the nameservers we use to retrive further Ns that are more specific to the qname ?!
+\param key  hash of the question computed i.e. with key := cache.Hash(q, cd)
+\param foundv4  domain-names of the nameservers that we already have an IPv4 address for
+\param nss .. (domain-names of )the nameservers we use to retrive further Ns that are more specific to the qname ?!
+\param[out] authservers
+*/
+func (r *Resolver) lookupANYNss(ctx context.Context, q dns.Question, authservers *authcache.AuthServers, key uint64, parentdsrr []dns.RR, nsStats nameserverStatus, nss nameservers, cd bool) {
+	relevantNSsForLookup := sortnss(nss, q.Name)
+	// try the nameservery from least specific regarding the qname to more specific (in terms of labels in common)
+	for _, nsname := range relevantNSsForLookup {
+		authservers.Nss = append(authservers.Nss, nsname)
+
+		// we already have this nameservers address, no need to look it up again
+		if stat, ok := nsStats[nsname]; ok {
+			if !r.lookupSCIONAddressEager {
+				// if we are not eager, a legacy IP is enough to get it working
+				if stat >= HasIPv4 {
+					continue
+				}
+			}
+		}
+
+		ctx, loop := r.checkLoop(ctx, nsname, dns.TypeANY)
+		if loop {
+			// an IPv4 ist the least we can expect to make anything work
+			// if we cant even satisfy this, were done
+			if _, ok := r.getIPv4Cache(nsname); !ok {
+				log.Debug("Looping during ns lookup ANY", "query", formatQuestion(q), "ns", nsname)
+				continue
+			}
+		}
+
+		if len(authservers.List) > 0 {
+			// temprorary cache before lookup
+			r.ncache.Set(key, parentdsrr, authservers, time.Minute)
+		}
+
+		//addrs, err := r.lookupNSAddrV4(ctx, nsname, cd)
+		addrs, err := r.lookupNSAddrANY(ctx, nsname, cd)
+
+		nsipv4 := make(map[string][]string)
+		nsipv6 := make(map[string][]string)
+		nsscion := make(map[string][]string)
+
+		if err != nil {
+			log.Debug("Lookup NS address ANY failed", "query", formatQuestion(q), "ns", nsname, "error", err.Error())
+			continue
+		}
+
+		if len(addrs) == 0 {
+			continue
+		}
+
+		authservers.Lock()
+	addrsloop:
+		// store the nameserver name's addresses we just retrieved into the authservers.List
+		//
+		for _, addr := range addrs {
+			var raddr string
+
+			switch addr.Type {
+			case IPv4Addr:
+				raddr = net.JoinHostPort(addr.Addr, "53")
+				if addrs, ok := nsipv4[nsname]; ok {
+					nsipv4[nsname] = append(addrs, addr.Addr) // why not raddr here ?!
+				} else {
+					nsipv4[nsname] = []string{addr.Addr}
+				}
+
+			case IPv6Addr:
+				raddr = net.JoinHostPort(addr.Addr, "53")
+				if addrs, ok := nsipv6[nsname]; ok {
+					nsipv6[nsname] = append(addrs, addr.Addr) // why not raddr here ?!
+				} else {
+					nsipv6[nsname] = []string{addr.Addr}
+				}
+			case SCIONAddr:
+				raddr = WithPortIfNotSet(addr.Addr, SDoQPort)
+				if addrs, ok := nsscion[nsname]; ok {
+					nsscion[nsname] = append(addrs, addr.Addr) // why not raddr here ?!
+				} else {
+					nsscion[nsname] = []string{addr.Addr}
+				}
+
+			}
+
+			// check if this address is not even already present(we dont want duplicates)
+			for _, s := range authservers.List {
+				if s.Addr == raddr {
+					continue addrsloop
+				}
+			}
+			authservers.List = append(authservers.List, authcache.NewAuthServer(raddr, addr.Type.ToAuthcacheVersion()))
+		}
+		authservers.Unlock()
+		r.addIPv4Cache(nsipv4)
+		r.addIPv6Cache(nsipv6)
+		r.addSCIONCache(nsscion)
+	}
+}
+
+/*
+\param key  hash of the question computed i.e. with key := cache.Hash(q, cd)
+\param foundv4  domain-names of the nameservers that we already have an IPv4 address for
+\param nss .. (domain-names of )the nameservers we use to retrive further Ns that are more specific to the qname ?!
 \param[out] authservers
 */
 func (r *Resolver) lookupV4Nss(ctx context.Context, q dns.Question, authservers *authcache.AuthServers, key uint64, parentdsrr []dns.RR, foundv4, nss nameservers, cd bool) {
@@ -792,15 +903,131 @@ addrsloopscion:
 	return oldsize != len(servers.List)
 }
 
+type NSStatus uint8
+
+const (
+	HasNone  NSStatus = 0
+	HasIPv4  NSStatus = 1
+	HasIPv6  NSStatus = 2
+	HasSCION NSStatus = 4
+)
+
+type nameserverStatus map[string]NSStatus
+
+func (r *Resolver) checkANYGlueRR(resp *dns.Msg, nss nameservers, level int) (*authcache.AuthServers, nameserverStatus) {
+	authservers := &authcache.AuthServers{}
+	foundWithStatus := make(nameserverStatus)
+
+	nsscion := make(map[string][]string)
+	nsipv6 := make(map[string][]string)
+	nsipv4 := make(map[string][]string)
+
+	log.Debug("GLUE RR ANY", "resp", resp, "nss", nss)
+
+	for _, a := range resp.Extra {
+
+		qname := resp.Question[0].Name
+
+		if extra, ok := a.(*dns.TXT); ok {
+			name := strings.ToLower(extra.Header().Name) // nameserver name (can be longer than qname i.e. d0.org.afilias-nst.org. as Nameserver for org.)
+			i, _ := dns.PrevLabel(qname, level)
+
+			if dns.CompareDomainName(name, qname[i:]) < level {
+				// we cannot trust that glue, out of bailiwick.
+				continue
+			}
+
+			if _, ok := nss[name]; ok {
+				addr, ok := parseTXTasSCIONAddr(extra)
+				if !ok {
+					continue
+				}
+				// update the nameserver address status
+				if stat, ok := foundWithStatus[name]; ok {
+					foundWithStatus[name] = stat | HasSCION
+				} else {
+					foundWithStatus[name] = HasSCION
+				}
+
+				nsscion[name] = append(nsscion[name], addr)
+
+				authservers.List = append(authservers.List, authcache.NewAuthServer(WithPortIfNotSet(addr, SDoQPort), authcache.QUIC_SCION)) // use SDoQPort here
+			}
+		} else if extra, ok := a.(*dns.AAAA); ok {
+			name := strings.ToLower(extra.Header().Name) // nameserver name (can be longer than qname i.e. d0.org.afilias-nst.org. as Nameserver for org.)
+			i, _ := dns.PrevLabel(qname, level)
+
+			if dns.CompareDomainName(name, qname[i:]) < level {
+				// we cannot trust that glue, out of bailiwick.
+				continue
+			}
+
+			if _, ok := nss[name]; ok {
+				if isLocalIP(extra.AAAA) {
+					continue
+				}
+
+				if extra.AAAA.IsLoopback() {
+					continue
+				}
+
+				// update the nameserver address status
+				if stat, ok := foundWithStatus[name]; ok {
+					foundWithStatus[name] = stat | HasIPv6
+				} else {
+					foundWithStatus[name] = HasIPv6
+				}
+
+				nsipv6[name] = append(nsipv6[name], extra.AAAA.String())
+				authservers.List = append(authservers.List, authcache.NewAuthServer(net.JoinHostPort(extra.AAAA.String(), "53"), authcache.IPv6))
+			}
+		} else if extra, ok := a.(*dns.A); ok {
+			name := strings.ToLower(extra.Header().Name) // nameserver name (can be longer than qname i.e. d0.org.afilias-nst.org. as Nameserver for org.)
+			i, _ := dns.PrevLabel(qname, level)
+
+			if dns.CompareDomainName(name, qname[i:]) < level {
+				// we cannot trust that glue, it doesn't cover in the origin name.
+				continue
+			}
+
+			if _, ok := nss[name]; ok {
+				if isLocalIP(extra.A) {
+					continue
+				}
+
+				if extra.A.IsLoopback() {
+					continue
+				}
+
+				// update the nameserver address status
+				if stat, ok := foundWithStatus[name]; ok {
+					foundWithStatus[name] = stat | HasIPv4
+				} else {
+					foundWithStatus[name] = HasIPv4
+				}
+
+				nsipv4[name] = append(nsipv4[name], extra.A.String())
+				authservers.List = append(authservers.List, authcache.NewAuthServer(net.JoinHostPort(extra.A.String(), "53"), authcache.IPv4))
+			}
+		}
+	}
+
+	// add glue records to cache
+	r.addIPv4Cache(nsipv4)
+	r.addIPv6Cache(nsipv6)
+	r.addSCIONCache(nsscion)
+	return authservers, foundWithStatus
+}
+
 /*
 this method combs the Extra section of the received response resp
 for any glue records such as A, AAAA, or TXT
 
 \param resp
-\param nss
+\param nss  domain-names of the nameservers for which we a searching Addresses
 \param level
 */
-func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*authcache.AuthServers, nameservers, nameservers, nameservers) {
+func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*authcache.AuthServers /*foundv4*/, nameservers /*foundv6*/, nameservers /*foundscion*/, nameservers) {
 	authservers := &authcache.AuthServers{}
 
 	foundv4 := make(nameservers)
@@ -822,7 +1049,7 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 				// we cannot trust that glue, out of bailiwick.
 				continue
 			}
-
+			// is this one of the glue records we are looking for
 			if _, ok := nss[name]; ok {
 				addr, ok := parseTXTasSCIONAddr(extra)
 				if !ok {
@@ -832,7 +1059,7 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 				foundscion[name] = struct{}{}
 				nsscion[name] = append(nsscion[name], addr)
 
-				authservers.List = append(authservers.List, authcache.NewAuthServer(addr+":53", authcache.QUIC_SCION)) // use SDoQPort here
+				authservers.List = append(authservers.List, authcache.NewAuthServer(WithPortIfNotSet(addr, SDoQPort), authcache.QUIC_SCION)) // use SDoQPort here
 			}
 		}
 	}
@@ -910,6 +1137,45 @@ func (r *Resolver) addIPv4Cache(nsipv4 map[string][]string) {
 		key := cache.Hash(dns.Question{Name: name, Qtype: dns.TypeA})
 		r.ipv4cache.Add(key, addrs)
 	}
+}
+
+func (r *Resolver) getHighestAddressStatusInCache(name string) AddrFamily {
+	if _, ok := r.getSCIONCache(name); ok {
+		return SCIONAddr
+	}
+	if _, ok := r.getIPv6Cache(name); ok {
+		return IPv6Addr
+	}
+
+	if _, ok := r.getIPv4Cache(name); ok {
+		return IPv4Addr
+	}
+
+	return NoAddr
+}
+
+func (r *Resolver) getCacheTyped(name string) ([]typedAddress, bool) {
+	var result []typedAddress
+
+	if ipv4add, ok := r.getIPv4Cache(name); ok {
+
+		for _, ip := range ipv4add {
+			result = append(result, typedAddress{Addr: ip, Type: IPv4Addr})
+		}
+	}
+	if ipv6add, ok := r.getIPv6Cache(name); ok {
+
+		for _, ip := range ipv6add {
+			result = append(result, typedAddress{Addr: ip, Type: IPv6Addr})
+		}
+	}
+	if scionadd, ok := r.getSCIONCache(name); ok {
+
+		for _, ip := range scionadd {
+			result = append(result, typedAddress{Addr: ip, Type: SCIONAddr})
+		}
+	}
+	return result, len(result) != 0
 }
 
 func (r *Resolver) getIPv4Cache(name string) ([]string, bool) {
@@ -1588,6 +1854,72 @@ func (r *Resolver) lookupDS(ctx context.Context, qname string) (msg *dns.Msg, er
 	}
 
 	return dsres, nil
+}
+
+type AddrFamily uint8
+
+func (af *AddrFamily) ToAuthcacheVersion() authcache.Version {
+	switch *af {
+	case IPv4Addr:
+		return authcache.IPv4
+	case IPv6Addr:
+		return authcache.IPv6
+	case SCIONAddr:
+		return authcache.QUIC_SCION
+	}
+	panic("this Address family has no translation to authcache.Version")
+}
+
+const (
+	NoAddr    AddrFamily = 0
+	IPv4Addr  AddrFamily = 1
+	IPv6Addr  AddrFamily = 2
+	SCIONAddr AddrFamily = 4
+)
+
+type typedAddress struct {
+	Addr string
+	Type AddrFamily
+}
+
+/*
+\brief retrieve the IPv4 address for a nameserver with domain-name 'qname'
+\details creates a query for 'qname' with Qtype A and exchanges it internally.
+\param qname  .. the domain-name of a nameserver that we got from a response's Nss section and now want to dial
+*/
+func (r *Resolver) lookupNSAddrANY(ctx context.Context, qname string, cd bool) (addrs []typedAddress, err error) {
+	log.Debug("Lookup NS address ANY", "qname", qname)
+
+	if stat := r.getHighestAddressStatusInCache(qname); stat == SCIONAddr {
+		addrs, _ := r.getCacheTyped(qname)
+		fmt.Printf("found: %v in cache\n", addrs)
+		return addrs, nil
+	}
+
+	ctx = context.WithValue(ctx, ctxKey("nsl"), struct{}{})
+
+	nsReq := new(dns.Msg)
+	nsReq.SetQuestion(qname, dns.TypeANY)
+	nsReq.SetEdns0(dnsutil.DefaultMsgSize, true)
+	nsReq.CheckingDisabled = cd
+
+	nsres, err := dnsutil.ExchangeInternal(ctx, nsReq)
+	if err != nil {
+		return addrs, fmt.Errorf("nameserver address lookup ANY failed for %s (%v)", qname, err)
+	}
+
+	// return any A,AAAA,TXT records from the response's answer section
+	if addrs, ok := searchAddrsTyped(nsres); ok {
+		fmt.Printf("found: %v\n", addrs)
+		return addrs, nil
+	}
+
+	if stat := r.getHighestAddressStatusInCache(qname); stat == SCIONAddr {
+		addrs, _ := r.getCacheTyped(qname)
+		return addrs, nil
+	}
+
+	return addrs, fmt.Errorf("nameserver address lookup ANY failed for %s", qname)
 }
 
 /*

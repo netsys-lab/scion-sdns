@@ -59,6 +59,57 @@ func shuffleStr(vals []string) []string {
 /*
 search the response msg's Answer section and return any addresses A,AAAA, TXT from it
 */
+func searchAddrsTyped(msg *dns.Msg) (addrs []typedAddress, found bool) {
+	found = false
+
+	for _, rr := range msg.Answer {
+		if r, ok := rr.(*dns.A); ok {
+			if isLocalIP(r.A) {
+				continue
+			}
+
+			if r.A.To4() == nil {
+				continue
+			}
+
+			if r.A.IsLoopback() {
+				continue
+			}
+
+			addrs = append(addrs, typedAddress{Addr: r.A.String(), Type: IPv4Addr})
+			found = true
+		} else if r, ok := rr.(*dns.AAAA); ok {
+			if isLocalIP(r.AAAA) {
+				continue
+			}
+
+			if r.AAAA.To16() == nil {
+				continue
+			}
+
+			if r.AAAA.IsLoopback() {
+				continue
+			}
+
+			addrs = append(addrs, typedAddress{Addr: r.AAAA.String(), Type: IPv6Addr})
+			found = true
+		} else if r, ok := rr.(*dns.TXT); ok {
+			///if saddr := SCIONAddrFromString(strings.Join(r.Txt), ""); saddr != "" {		}
+			//}
+
+			if saddr, okk := parseTXTasSCIONAddr(r); okk { // use SCIONAddrFromString here
+				addrs = append(addrs, typedAddress{Addr: saddr, Type: SCIONAddr})
+				found = true
+			}
+		}
+	}
+
+	return
+}
+
+/*
+search the response msg's Answer section and return any addresses A,AAAA, TXT from it
+*/
 func searchAddrs(msg *dns.Msg) (addrs []string, found bool) {
 	found = false
 
@@ -97,7 +148,7 @@ func searchAddrs(msg *dns.Msg) (addrs []string, found bool) {
 			///if saddr := SCIONAddrFromString(strings.Join(r.Txt), ""); saddr != "" {		}
 			//}
 
-			if saddr, okk := parseTXTasSCIONAddr(r); okk {
+			if saddr, okk := parseTXTasSCIONAddr(r); okk { // use SCIONAddrFromString here
 				addrs = append(addrs, saddr)
 				found = true
 			}
@@ -169,6 +220,7 @@ func parseTXTasSCIONAddr(txt *dns.TXT) (addr string, ok bool) {
 	return
 }
 
+// check if SCION address has a port set
 func HasPort(addr string) bool {
 	addrRegexp := regexp.MustCompile(`(?P<isia>\d+-[\d:A-Fa-f]+,[\d.:\[\]a-z]+):(?P<port>\d+)`)
 
@@ -178,6 +230,7 @@ func HasPort(addr string) bool {
 
 }
 
+// adds port to SCION Address if it not yet has one
 func WithPortIfNotSet(addr string, port int) string {
 	addrRegexp := regexp.MustCompile(`(?P<isia>\d+-[\d:A-Fa-f]+,[\d.:\[\]a-z]+):(?P<port>\d+)`)
 
