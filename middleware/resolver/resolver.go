@@ -1351,11 +1351,7 @@ func (r *Resolver) exchange(ctx context.Context, proto string, req *dns.Msg, ser
 			fmt.Printf("parse of pan.UPDAddr failed with: %v in resolver \n", server.Addr)
 		}
 		local = netaddr.IPPort{}
-		co.quicEarlySession, err = pan.DialQUICEarly(ctx, local, remote, nil, nil, hostForSNI, r.tlsConfig, &quic.Config{MaxIdleTimeout: 5 * time.Minute})
-		//co.Conn, err = pan.DialQUICEarly(ctx, local, remote, nil, nil, hostForSNI, r.tlsConfig, &quic.Config{MaxIdleTimeout: 5 * time.Minute}) // does not impl net.Conn because no Close()
-
-		//test, err := pan.DialQUIC(ctx, local, remote, nil, nil, hostForSNI, r.tlsConfig, &quic.Config{MaxIdleTimeout: 5 * time.Minute})
-		//co.Conn = *test // no net.Conn, because no close()
+		co.quicEarlySession, err = pan.DialQUICEarly(ctx, local.UDPAddr().AddrPort(), remote, hostForSNI, r.tlsConfig, &quic.Config{MaxIdleTimeout: 5 * time.Minute})
 
 		if err != nil {
 			fmt.Printf("dialQUIC failed in resolver: %v \n", err.Error())

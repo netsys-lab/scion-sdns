@@ -4,12 +4,13 @@ import (
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/base64"
-	"github.com/miekg/dns"
-	"github.com/semihalev/log"
 	"hash/fnv"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/miekg/dns"
+	"github.com/semihalev/log"
 )
 
 const (
@@ -30,7 +31,7 @@ type ROA struct {
 }
 
 func verifyRhineROA(roa *ROA, certFile string) bool {
-	_, publiKey, err := ParseVerifyRhineCertTxtEntry(roa.rcert, certFile)
+	_, publicKey, err := ParseVerifyRhineCertTxtEntry(roa.rcert, certFile)
 	if err != nil {
 		log.Warn(err.Error())
 		return false
@@ -43,7 +44,18 @@ func verifyRhineROA(roa *ROA, certFile string) bool {
 	if !sig.ValidityPeriod(time.Now().UTC()) {
 		expired = "(*EXPIRED*)"
 	}
-	if err := sig.VerifyWithPublicKey(publiKey, []dns.RR{key}); err != nil {
+
+	//key := &dns.DNSKEY{Flags: 257, Protocol: 3, Algorithm: dns.ED25519}
+	//key.Hdr = dns.RR_Header{Name: "placeholder.whatever.lol.", // has to be DNSName or SubjectName of the RHINE cert ?!
+	//	Rrtype: dns.TypeDNSKEY,
+	//  Class:  dns.ClassINET, Ttl: 3600}
+	key.PublicKey = base64.StdEncoding.EncodeToString(publicKey)
+
+	// old loujie1/dns code
+	//if err := roa.keySig.VerifyWithPublicKey(publiKey, []dns.RR{roa.dnskey}); err != nil {
+	if err := roa.keySig.Verify(key, []dns.RR{roa.dnskey}); err != nil {
+
+		//if err := sig.VerifyWithPublicKey(publiKey, []dns.RR{key}); err != nil {
 		log.Error("RHINE Verify ROA", "sig", shortSig(sig), "error", err, "expired?", expired)
 		return false
 	}

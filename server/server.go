@@ -193,7 +193,7 @@ func ListenSQUICPacket(address string) (net.PacketConn, error) {
 		return nil, parseerror
 	}
 
-	pconn, e := pan.ListenUDP(context.Background(), ipport, pan.NewDefaultReplySelector())
+	pconn, e := pan.ListenUDP(context.Background(), ipport)
 
 	if e != nil {
 		return nil, e

@@ -1,0 +1,19 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "go",
+			"label": "go: build sdns",
+			"command": "build",
+			"args": [
+				//"${fileDirname}"
+				"."
+			],
+			"problemMatcher": [
+				"$go"
+			],
+			"group": "build",
+			"detail": "cd /repos/scion-sdns; go build ${fileDirname}"
+		}
+	]
+}
