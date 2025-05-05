@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 
@@ -64,13 +65,20 @@ func (h *DNSHandler) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 		ctx = context.WithValue(ctx, ctxKey("reqid"), req.Id)
 	}
 	msg := h.handle(ctx, req)
+	if req_id := ctx.Value(ctxKey("reqid")).(uint16); msg.Id != req_id {
+		// restore the original request ID
+		msg.Id = req_id
+		// fmt.Print("ERROR: REQUEST ID MISMATCH expected: %d got %d", req_id, msg.Id)
+	} else {
+		fmt.Print("NOTE: req id matches") // this should never happen! in DoQ we expect reqID to always be == 0
+	}
 
 	_ = w.WriteMsg(msg)
 }
 
 func (h *DNSHandler) handle(ctx context.Context, req *dns.Msg) *dns.Msg {
 	q := req.Question[0]
-
+	orig_req_id := req.Id
 	do := false
 	opt := req.IsEdns0()
 	if opt != nil {
@@ -195,6 +203,9 @@ func (h *DNSHandler) handle(ctx context.Context, req *dns.Msg) *dns.Msg {
 		}
 	}
 	log.Debug("Return Msg to client ", resp, resp.String())
+	if req.Id != orig_req_id {
+		fmt.Printf("ERROR: REQUEST ID MISMATCH")
+	}
 	return resp
 }
 func getROA(ctx context.Context, signer string, resp *dns.Msg) (roa *ROA, err error) {

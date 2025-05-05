@@ -236,11 +236,11 @@ func WithPortIfNotSet(addr string, port int) string {
 
 	match := addrRegexp.FindStringSubmatch(addr)
 
-	if len(match) == 4 {
+	if match[3] != "" {
 		// address already has port
-		return match[0]
+		return addr
 	}
-	return match[1] + ":" + fmt.Sprint(port)
+	return match[0] + ":" + fmt.Sprint(port)
 }
 
 /*
