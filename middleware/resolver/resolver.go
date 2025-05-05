@@ -43,7 +43,7 @@ type Resolver struct {
 	delegCache *cache.Cache
 	rootkeys   []dns.RR
 
-	qnameMinLevel           int
+	qnameMinLevel           int // maximum treshold of level(labels from the right) beyond which no QName minimization is performed anymore
 	netTimeout              time.Duration
 	lookupSCIONAddressEager bool // if set, the resolver will try to find a SCION Address for every nameserver, even though it might already have an IP
 
@@ -209,15 +209,17 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 	// Current default minimize level 5, if we down to level 3, performance gain 20%
 	minReq, minimized := r.minimize(req, level, nomin)
 
-	log.Debug("Query inserted", "reqid", minReq.Id, "zone", servers.Zone, "query", formatQuestion(minReq.Question[0]), "cd", req.CheckingDisabled, "qname-minimize", minimized, "extra", extra)
+	log.Debug("Query inserted", "reqid", minReq.Id, "zone", servers.Zone, "query", formatQuestion(minReq.Question[0]), "cd", req.CheckingDisabled, "qname-minimize", minimized, "extra", extra, "level", level)
 
 	resp, err := r.groupLookup(ctx, minReq, servers)
 	//log.Debug("Resolve", "ctx", ctx, "minReq", minReq, "servers", servers, "resp", resp, "err", err)
 
 	// handle the worst case -> any non dns related 'real' network errors
+	// branch00
 	if err != nil {
+		// branch00-0
 		if minimized {
-			// return without minimized
+			// return without minimization (use original unmini request, that has still level+1 labels)
 			return r.Resolve(ctx, req, servers, false, depth, level, true, parentdsrr, extra...)
 		}
 
@@ -231,6 +233,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 
 			if atomic.AddUint32(&servers.ErrorCount, 1) == 5 {
 				if ok := r.checkNss(ctx, servers); ok {
+					// im pretty sure 'root' is always true here ?!
 					return r.Resolve(ctx, req, servers, root, depth, level, nomin, parentdsrr, extra...)
 				}
 			}
@@ -245,11 +248,18 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		// the non-successful Rcode could be due to us asking to little
 		// (level to low and thus domain-name to few labels ) ?!
 		// try again asking one level more
+
+		// keine answer section zu bekommen is leicht, aber was muss man machen um eine leere Authority/Ns section zu bekommen
+		// das geht doch eigentlich nur, wenn man den komplett falschen server für einen Qname fragt
+		// also die zone des befragten nameserver kein suffix des qname is
+
+		//branch01-0
 		if minimized {
 			level++
-			// why not minReq here instead of req ??
 			return r.Resolve(ctx, req, servers, false, depth, level, nomin, parentdsrr)
 		}
+
+		// whatever we received, is not a referral and for sure irrecoverable => End resolution
 		return resp, nil
 	}
 	// assert 01 (negation of branch01 condition)
@@ -260,69 +270,94 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 	/* we were successfully referred ?!
 	got at least one Answer and (either dns.RcodeSuccess
 	or at least one Nameserver) otherwise first branch would have been taken
-	(if we got nameserver or not doesnt matter here ?!)*/
-	// branch 02
+	(if we got nameserver or not doesnt matter here ?!)
+
+	what makes this branch specific to Not-minimized ? the previous Resolve() call might came from branch00-0
+	*/
+	// branch 02 - this is the desirable case of a happy-ending resolution (with Answer and RcodeSuccess)
 	if !minimized && len(resp.Answer) > 0 {
+
+		// here len(resp.Ns)>0  true/false is possible
+
 		// this is like auth server external cname error but this can be recover.
 		if resp.Rcode == dns.RcodeServerFailure && len(resp.Answer) > 0 {
+			// len(resp.Ns)>0 might have any value here
 			resp.Rcode = dns.RcodeSuccess
 		}
-		// why dnssec verification only on NameError ?!
+
 		if resp.Rcode == dns.RcodeNameError {
+			// this is a dead-end. We received our answer, though not the one we wanted
+			// => Verify and end resolution
 			return r.authority(ctx, req, resp, parentdsrr, req.Question[0].Qtype) // TODO make multi-question capabale
 		}
 
 		return r.answer(ctx, req, resp, parentdsrr, extra...)
 	}
 	// assert 02 (negation of both branch01 &02)
-	if !(minimized && resp.Rcode == dns.RcodeSuccess ||
-		len(resp.Answer) > 0 && minimized ||
-		len(resp.Ns) > 0 && minimized ||
-		resp.Rcode == dns.RcodeSuccess && len(resp.Answer) == 0 ||
-		len(resp.Ns) > 0 && len(resp.Answer) == 0) {
+	if !(minimized && resp.Rcode == dns.RcodeSuccess || // 02-A
+		len(resp.Answer) > 0 && minimized || // 02-B
+		len(resp.Ns) > 0 && minimized || // 02-C
+		// A,B,C together mean minimized &&( RcodeSuccess || haveAnser || haveNs (haveReferral ?!) )
+		resp.Rcode == dns.RcodeSuccess && len(resp.Answer) == 0 || // 02-C
+		len(resp.Ns) > 0 && len(resp.Answer) == 0) { // 02-D
 		panic("logic error")
 	}
 	// branch 03
 	if minimized && (len(resp.Answer) == 0 && len(resp.Ns) == 0) || len(resp.Answer) > 0 {
+
+		if !(minimized && len(resp.Answer) > 0 ||
+			minimized && resp.Rcode == dns.RcodeSuccess && len(resp.Ns) == 0 && len(resp.Answer) == 0) {
+			panic("assertion failed")
+		}
+
+		// if we eventually have at least one answer here, why not doing anything with it ?
 		level++
-		/// why not minReq here ?
+		// use original request 'req', as using minReq here would do noting
 		return r.Resolve(ctx, req, servers, false, depth, level, nomin, parentdsrr)
 	}
 
-	// assert 03
+	// assert 03 - branch 03 wasnt taken, neither 01 and 02
 	if !(len(resp.Ns) > 0 && len(resp.Answer) == 0 && minimized && resp.Rcode == dns.RcodeSuccess ||
 		len(resp.Ns) > 0 && len(resp.Answer) == 0 && minimized ||
 		len(resp.Ns) > 0 && len(resp.Answer) == 0) {
 		panic("my logic sucks")
 	}
 
-	if len(resp.Ns) > 0 {
+	// branch 04
+	if len(resp.Ns) > 0 { // this is redundant(always true ) since assert03 passed
 
+		// branch05
 		if minimized {
 			// failed
-			//	if !(len(req.Ns) > 0 && len(req.Answer) == 0) {
-			//		panic("my logic is wrong")
-			//	}
+			if !(len(req.Answer) == 0) {
+				panic("my logic is wrong")
+			}
 			for _, rr := range resp.Ns {
-				if !(len(req.Answer) == 0) {
-					panic("my logic is wrong")
-				}
-				if _, ok := rr.(*dns.SOA); ok {
+
+				if so, ok := rr.(*dns.SOA); ok {
+					// here it must hold that so.Header().Name is a suffix of minReq.Question[0].QName
+					// (and the number of the common labels must equal level )
+					// otherwise we wouldnt have gotten this far
+					log.Debug("continue with SOA NS: " + so.Header().Name)
 					level++
 					return r.Resolve(ctx, req, servers, false, depth, level, nomin, parentdsrr)
 				}
 
 				if _, ok := rr.(*dns.CNAME); ok {
 					level++
+					// here same as above is true
 					return r.Resolve(ctx, req, servers, false, depth, level, nomin, parentdsrr)
 				}
 			}
 		}
 
+		// here len(resp.Answer)==0 && !minimized holds
+
 		var nsrr *dns.NS
 
 		soa := false
 		nss := make(nameservers) // domain-names of nameservers authoritative for the qname in 'minReq'
+
 		for _, rr := range resp.Ns {
 			if _, ok := rr.(*dns.SOA); ok {
 				soa = true
@@ -333,11 +368,15 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 				nss[strings.ToLower(nsrec.Ns)] = struct{}{}
 			}
 		}
-
+		// branch 06
 		if len(nss) == 0 {
+			// there were RRs in the Authority/NS section, but none of them was a NsRR
+			// This is a dead end then, as we have no NS's left to ask
+
 			return r.authority(ctx, minReq, resp, parentdsrr, q.Qtype)
 		}
 
+		// branch07
 		if soa {
 			var authrrs []dns.RR
 			authrrs = append(authrrs, resp.Ns...)
@@ -348,11 +387,15 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 					resp.Ns = append(resp.Ns, rr)
 				}
 			}
+
+			// what is the reason for the resolution to end here (given that we havent received an answer yet ) only because the Auth. section contained an SOA RR ?!
+			// why dont we go on and ask the nameservers that we learned about
 			return r.authority(ctx, minReq, resp, parentdsrr, q.Qtype)
 		}
 		// this question asks for other Nameservers authoritative for the same zone(nsrr.Header().Name)
 		// as the one from the Ns section, that we already have ?!
 		q = dns.Question{Name: nsrr.Header().Name, Qtype: nsrr.Header().Rrtype, Qclass: nsrr.Header().Class}
+
 		// TODO DNSSEC verification removed
 		//signer, signerFound := r.findRRSIG(resp, q.Name, false)
 		//if !signerFound && len(parentdsrr) > 0 && req.Question[0].Qtype == dns.TypeDS {
@@ -401,17 +444,23 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		}
 
 		nlevel := dns.CountLabel(q.Name)
+
+		// branch08
 		if level > nlevel {
+			log.Debug("overshoot level: %v  nlevel: %v  qname: %v qnameMinLvl: %v", level, nlevel, q.Name, r.qnameMinLevel)
 			// overshoot detected. Any further recursion is pointless here
+
+			// only try again without mini, if this resolution wasnt already
 			if r.qnameMinLevel > 0 && !nomin {
-				//try without minimization again (set level back to 0)
+				//try without minimization again (set level back to 0 and nomin to true)
 				return r.Resolve(ctx, req, r.rootservers, true, depth, 0, true, nil, extra...)
 			}
-			return resp, errParentDetection
+			return resp, errParentDetection // what is that supposed to mean ?
 		}
 
 		cd := req.CheckingDisabled
 		if len(parentdsrr) == 0 {
+			// if there is nothing to validate with, we might as well disable checking ?!
 			cd = true
 		}
 
@@ -1231,6 +1280,48 @@ func (r *Resolver) removeSCIONCache(name string) {
 	r.scioncache.Remove(cache.Hash(dns.Question{Name: name, Qtype: dns.TypeTXT}))
 }
 
+/*
+RFC 7816 QNAME Minimisation March 2016
+Appendix A. An Algorithm to Perform QNAME Minimisation
+ This algorithm performs name resolution with QNAME minimisation in
+ the presence of zone cuts that are not yet known.
+ Although a validating resolver already has the logic to find the
+ zone cuts, implementers of other resolvers may want to use this
+ algorithm to locate the cuts. This is just a possible aid for
+ implementers; it is not intended to be normative:
+ (0) If the query can be answered from the cache, do so; otherwise,
+ iterate as follows:
+ (1) Find the closest enclosing NS RRset in your cache. The owner of
+ this NS RRset will be a suffix of the QNAME -- the longest suffix
+ of any NS RRset in the cache. Call this ANCESTOR.
+ (2) Initialise CHILD to the same as ANCESTOR.
+ (3) If CHILD is the same as the QNAME, resolve the original query
+ using ANCESTOR’s name servers, and finish.
+ (4) Otherwise, add a label from the QNAME to the start of CHILD.
+ (5) If you have a negative cache entry for the NS RRset at CHILD, go
+ back to step 3.
+ (6) Query for CHILD IN NS using ANCESTOR’s name servers. The
+ response can be:
+ (6a) A referral. Cache the NS RRset from the authority section,
+ and go back to step 1.
+ (6b) An authoritative answer. Cache the NS RRset from the
+ answer section, and go back to step 1.
+ (6c) An NXDOMAIN answer. Return an NXDOMAIN answer in response
+ to the original query, and stop.
+ (6d) A NOERROR/NODATA answer. Cache this negative answer, and
+ go back to step 3.
+*/
+
+/*
+minimize question qname
+
+example:  www.example.org. mini to lvl 1 => org.
+
+	www.example.org. 		to lvl 2 => example.org.
+
+\param nomin   if set query minimization is disabled
+\param level  number of labels from the right
+*/
 func (r *Resolver) minimize(req *dns.Msg, level int, nomin bool) (*dns.Msg, bool) {
 	if r.qnameMinLevel == 0 || nomin {
 		return req, false
@@ -1428,9 +1519,9 @@ func (r *Resolver) lookup(ctx context.Context, req *dns.Msg, servers *authcache.
 
 	authcache.Sort(serversList, atomic.AddUint64(&servers.Called, 1))
 
-	responseErrors := []*dns.Msg{}
+	responseErrors := []*dns.Msg{} // any received responses with RCode other than Success go here
 	configErrors := []*dns.Msg{}
-	fatalErrors := []error{}
+	fatalErrors := []error{} // any real errors returned by (Resolver)exchange()
 
 	returned := make(chan struct{})
 	defer close(returned)
@@ -1468,7 +1559,7 @@ mainloop:
 	for index, server := range serversList {
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
-
+		serverListExhausted := len(serversList)-1 == index
 		go startRacer(ctx, req.CopyTo(AcquireMsg()), server)
 
 	fallbackloop:
@@ -1477,7 +1568,7 @@ mainloop:
 
 			select {
 			case <-fallbackTimer.C:
-				if left > 0 && len(serversList)-1 == index {
+				if left > 0 && serverListExhausted {
 					continue fallbackloop
 				}
 				continue mainloop
@@ -1487,7 +1578,7 @@ mainloop:
 				if res.error != nil {
 					fatalErrors = append(fatalErrors, res.error)
 
-					if left > 0 && len(serversList)-1 == index {
+					if left > 0 && serverListExhausted {
 						continue fallbackloop
 					}
 					continue mainloop
@@ -1503,16 +1594,18 @@ mainloop:
 						break mainloop
 					}
 
-					if left > 0 && len(serversList)-1 == index {
+					if left > 0 && serverListExhausted {
 						continue fallbackloop
 					}
 					continue mainloop
 				}
-
+				// the RcodeSuccess check is redundant here
 				if resp.Rcode == dns.RcodeSuccess && len(resp.Ns) > 0 && len(resp.Answer) == 0 {
 					for _, rr := range resp.Ns {
 						if nsrec, ok := rr.(*dns.NS); ok {
 							// looks invalid configuration, try another server
+							// as this would mean, the zones auth. NS is at the same height or higher
+							// than the node of the zone it is auth. for ?!
 							if dns.CountLabel(nsrec.Header().Name) <= level {
 								configErrors = append(configErrors, resp)
 
@@ -1520,7 +1613,7 @@ mainloop:
 								atomic.AddInt64(&server.Rtt, 2*time.Second.Nanoseconds())
 								atomic.AddInt64(&server.Count, 1)
 
-								if left > 0 && len(serversList)-1 == index {
+								if left > 0 && serverListExhausted {
 									continue fallbackloop
 								}
 								continue mainloop
@@ -1528,11 +1621,12 @@ mainloop:
 						}
 					}
 				}
+				// HERE it holds: res.error==nil &&resp.Rcode==dnsRcodeSuccess && (len(resp.NS)==0 || len(resp.Answer)>0)
 
 				return resp, nil
 			}
-		}
-	}
+		} // end of fallbackloop
+	} // end of mainloop
 
 	if len(responseErrors) > 0 {
 		for _, resp := range responseErrors {
