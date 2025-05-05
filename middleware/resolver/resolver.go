@@ -1692,9 +1692,8 @@ func (r *Resolver) exchange(ctx context.Context, proto string, req *dns.Msg, ser
 	defer ReleaseConn(co) // this will be close conn also
 
 	if server.Version == authcache.QUIC_SCION {
+		req.Id = 0 // mandated by DoQ RFC
 		log.Debug("Dialing SCION", "addr", server.Addr)
-		//co.Conn, err = sqnet.DialContextString(ctx, server.Addr)
-		//co.Conn, err = sqnet.DialString(server.Addr) // -> DialQUIC in the end
 
 		var local netaddr.IPPort
 
@@ -1720,7 +1719,10 @@ func (r *Resolver) exchange(ctx context.Context, proto string, req *dns.Msg, ser
 			fmt.Printf("parse of pan.UPDAddr failed with: %v in resolver \n", server.Addr)
 		}
 		local = netaddr.IPPort{}
-		co.quicEarlySession, err = pan.DialQUICEarly(ctx, local.UDPAddr().AddrPort(), remote, hostForSNI, r.tlsConfig, &quic.Config{MaxIdleTimeout: 5 * time.Minute})
+		r.tlsConfig.ServerName = hostForSNI // that's a bug in PAN (it just ignores SNI hostname)
+		co.quicEarlySession, err = pan.DialQUICEarly(ctx, local.UDPAddr().AddrPort(),
+			remote, hostForSNI, r.tlsConfig, &quic.Config{MaxIdleTimeout: 5 * time.Minute})
+		r.tlsConfig.ServerName = ""
 
 		if err != nil {
 			fmt.Printf("dialQUIC failed in resolver: %v \n", err.Error())

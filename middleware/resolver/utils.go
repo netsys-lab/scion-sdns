@@ -232,11 +232,11 @@ func HasPort(addr string) bool {
 
 // adds port to SCION Address if it not yet has one
 func WithPortIfNotSet(addr string, port int) string {
-	addrRegexp := regexp.MustCompile(`(?P<isia>\d+-[\d:A-Fa-f]+,[\d.:\[\]a-z]+):(?P<port>\d+)`)
+	addrRegexp := regexp.MustCompile(`(?P<isia>\d+-[\d:A-Fa-f]+),(?P<host>\[?[\d.:a-z]+\]?)(:[\d]+)?`)
 
 	match := addrRegexp.FindStringSubmatch(addr)
 
-	if len(match) == 3 {
+	if len(match) == 4 {
 		// address already has port
 		return match[0]
 	}
