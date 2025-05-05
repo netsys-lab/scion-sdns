@@ -2,9 +2,10 @@ package resolver
 
 import (
 	"context"
-	"github.com/semihalev/sdns/response"
 	"os"
 	"time"
+
+	"github.com/semihalev/sdns/response"
 
 	"github.com/miekg/dns"
 	"github.com/semihalev/log"
@@ -76,9 +77,9 @@ func (h *DNSHandler) handle(ctx context.Context, req *dns.Msg) *dns.Msg {
 		do = opt.Do()
 	}
 
-	if q.Qtype == dns.TypeANY {
+	/*if q.Qtype == dns.TypeANY {
 		return dnsutil.SetRcode(req, dns.RcodeNotImplemented, do)
-	}
+	}*/
 
 	// debug ns stats
 	if debugns && q.Qclass == dns.ClassCHAOS && q.Qtype == dns.TypeHINFO {

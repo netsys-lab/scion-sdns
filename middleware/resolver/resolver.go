@@ -983,7 +983,7 @@ func (r *Resolver) minimize(req *dns.Msg, level int, nomin bool) (*dns.Msg, bool
 			if minReq.Question[0].Name == q.Name {
 				minimized = false
 			} else {
-				minReq.Question[0].Qtype = dns.TypeA
+				minReq.Question[0].Qtype = dns.TypeANY
 			}
 		}
 	}
