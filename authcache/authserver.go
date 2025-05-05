@@ -10,10 +10,11 @@ import (
 // AuthServer type
 type AuthServer struct {
 	// place atomic members at the start to fix alignment for ARM32
-	Rtt     int64
-	Count   int64
-	Addr    string
-	Version Version
+	Rtt          int64
+	Count        int64
+	Addr         string
+	NsDomainName string // domain-name of the server (required for ServerName in TLSConfig )
+	Version      Version
 }
 
 // Version type
@@ -35,6 +36,14 @@ func NewAuthServer(addr string, version Version) *AuthServer {
 	return &AuthServer{
 		Addr:    addr,
 		Version: version,
+	}
+}
+
+func NewNamedAuthServer(servername, addr string, version Version) *AuthServer {
+	return &AuthServer{
+		Addr:         addr,
+		Version:      version,
+		NsDomainName: servername,
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/miekg/dns/resolvapi"
 	"github.com/netsec-ethz/scion-apps/pkg/pan"
 	"github.com/quic-go/quic-go"
 	"github.com/semihalev/log"
@@ -157,7 +158,15 @@ func (r *Resolver) parseRootServers(cfg *config.Config) {
 	}
 
 	for _, s := range cfg.RootSCIONServers {
-		r.rootservers.List = append(r.rootservers.List, authcache.NewAuthServer(s, authcache.QUIC_SCION))
+
+		// do reverse lookup with /etc/scion/hosts here ( need ServerName for TLSConfig )
+		rootserverHostnames, err := resolvapi.LookupUDPAddrHostsfile(context.TODO(), s)
+		if err != nil {
+			r.rootservers.List = append(r.rootservers.List, authcache.NewAuthServer(s, authcache.QUIC_SCION))
+		} else {
+
+			r.rootservers.List = append(r.rootservers.List, authcache.NewNamedAuthServer(rootserverHostnames[0], s, authcache.QUIC_SCION))
+		}
 	}
 }
 
@@ -501,7 +510,7 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 		r.lookupANYNss(ctx, q, authservers, key, parentdsrr, stats, nss, cd)
 
 		if len(authservers.List) == 0 {
-			if minimized && level < nlevel {
+			if minimized && level < nlevel { // no overshoot ?!
 				level++
 				return r.Resolve(ctx, req, servers, false, depth, level, nomin, parentdsrr)
 			}
@@ -534,6 +543,8 @@ func (r *Resolver) Resolve(ctx context.Context, req *dns.Msg, servers *authcache
 	if !(!minimized && len(req.Answer) == 0) {
 		panic("my logic is wrong")
 	}
+
+	panic("my guess is, this is unreachable")
 
 	// no answer, no authority. create new msg safer, sometimes received weird responses
 	m := new(dns.Msg)
@@ -679,7 +690,7 @@ func (r *Resolver) lookupANYNss(ctx context.Context, q dns.Question, authservers
 					continue addrsloop
 				}
 			}
-			authservers.List = append(authservers.List, authcache.NewAuthServer(raddr, addr.Type.ToAuthcacheVersion()))
+			authservers.List = append(authservers.List, authcache.NewNamedAuthServer(name, raddr, addr.Type.ToAuthcacheVersion()))
 		}
 		authservers.Unlock()
 		r.addIPv4Cache(nsipv4)
@@ -747,7 +758,7 @@ func (r *Resolver) lookupV4Nss(ctx context.Context, q dns.Question, authservers 
 					continue addrsloop
 				}
 			}
-			authservers.List = append(authservers.List, authcache.NewAuthServer(raddr, authcache.IPv4))
+			authservers.List = append(authservers.List, authcache.NewNamedAuthServer(name, raddr, authcache.IPv4))
 		}
 		authservers.Unlock()
 		r.addIPv4Cache(nsipv4)
@@ -796,7 +807,7 @@ func (r *Resolver) lookupV6Nss(ctx context.Context, q dns.Question, authservers 
 					continue addrsloop
 				}
 			}
-			authservers.List = append(authservers.List, authcache.NewAuthServer(raddr, authcache.IPv6))
+			authservers.List = append(authservers.List, authcache.NewNamedAuthServer(name, raddr, authcache.IPv6))
 		}
 		authservers.Unlock()
 		r.addIPv6Cache(nsipv6)
@@ -846,7 +857,7 @@ func (r *Resolver) lookupSCIONNss(ctx context.Context, q dns.Question, authserve
 					continue addrsloop
 				}
 			}
-			authservers.List = append(authservers.List, authcache.NewAuthServer(raddr, authcache.QUIC_SCION))
+			authservers.List = append(authservers.List, authcache.NewNamedAuthServer(name, raddr, authcache.QUIC_SCION))
 		}
 		authservers.Unlock()
 		r.addSCIONCache(nsscion)
@@ -922,7 +933,7 @@ addrsloopv4:
 				continue addrsloopv4
 			}
 		}
-		servers.List = append(servers.List, authcache.NewAuthServer(raddr, authcache.IPv4))
+		servers.List = append(servers.List, authcache.NewNamedAuthServer(name, raddr, authcache.IPv4))
 	}
 
 addrsloopv6:
@@ -933,7 +944,7 @@ addrsloopv6:
 				continue addrsloopv6
 			}
 		}
-		servers.List = append(servers.List, authcache.NewAuthServer(raddr, authcache.IPv6))
+		servers.List = append(servers.List, authcache.NewNamedAuthServer(name, raddr, authcache.IPv6))
 	}
 
 addrsloopscion:
@@ -944,7 +955,7 @@ addrsloopscion:
 				continue addrsloopscion
 			}
 		}
-		servers.List = append(servers.List, authcache.NewAuthServer(raddr, authcache.QUIC_SCION))
+		servers.List = append(servers.List, authcache.NewNamedAuthServer(name, raddr, authcache.QUIC_SCION))
 	}
 
 	servers.Checked = true
@@ -1000,7 +1011,7 @@ func (r *Resolver) checkANYGlueRR(resp *dns.Msg, nss nameservers, level int) (*a
 
 				nsscion[name] = append(nsscion[name], addr)
 
-				authservers.List = append(authservers.List, authcache.NewAuthServer(WithPortIfNotSet(addr, SDoQPort), authcache.QUIC_SCION)) // use SDoQPort here
+				authservers.List = append(authservers.List, authcache.NewNamedAuthServer(name, WithPortIfNotSet(addr, SDoQPort), authcache.QUIC_SCION)) // use SDoQPort here
 			}
 		} else if extra, ok := a.(*dns.AAAA); ok {
 			name := strings.ToLower(extra.Header().Name) // nameserver name (can be longer than qname i.e. d0.org.afilias-nst.org. as Nameserver for org.)
@@ -1028,7 +1039,7 @@ func (r *Resolver) checkANYGlueRR(resp *dns.Msg, nss nameservers, level int) (*a
 				}
 
 				nsipv6[name] = append(nsipv6[name], extra.AAAA.String())
-				authservers.List = append(authservers.List, authcache.NewAuthServer(net.JoinHostPort(extra.AAAA.String(), "53"), authcache.IPv6))
+				authservers.List = append(authservers.List, authcache.NewNamedAuthServer(name, net.JoinHostPort(extra.AAAA.String(), "53"), authcache.IPv6))
 			}
 		} else if extra, ok := a.(*dns.A); ok {
 			name := strings.ToLower(extra.Header().Name) // nameserver name (can be longer than qname i.e. d0.org.afilias-nst.org. as Nameserver for org.)
@@ -1056,7 +1067,7 @@ func (r *Resolver) checkANYGlueRR(resp *dns.Msg, nss nameservers, level int) (*a
 				}
 
 				nsipv4[name] = append(nsipv4[name], extra.A.String())
-				authservers.List = append(authservers.List, authcache.NewAuthServer(net.JoinHostPort(extra.A.String(), "53"), authcache.IPv4))
+				authservers.List = append(authservers.List, authcache.NewNamedAuthServer(name, net.JoinHostPort(extra.A.String(), "53"), authcache.IPv4))
 			}
 		}
 	}
@@ -1108,7 +1119,7 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 				foundscion[name] = struct{}{}
 				nsscion[name] = append(nsscion[name], addr)
 
-				authservers.List = append(authservers.List, authcache.NewAuthServer(WithPortIfNotSet(addr, SDoQPort), authcache.QUIC_SCION)) // use SDoQPort here
+				authservers.List = append(authservers.List, authcache.NewNamedAuthServer(name, WithPortIfNotSet(addr, SDoQPort), authcache.QUIC_SCION)) // use SDoQPort here
 			}
 		}
 	}
@@ -1138,7 +1149,7 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 				foundv6[name] = struct{}{}
 
 				nsipv6[name] = append(nsipv6[name], extra.AAAA.String())
-				authservers.List = append(authservers.List, authcache.NewAuthServer(net.JoinHostPort(extra.AAAA.String(), "53"), authcache.IPv6))
+				authservers.List = append(authservers.List, authcache.NewNamedAuthServer(name, net.JoinHostPort(extra.AAAA.String(), "53"), authcache.IPv6))
 			}
 		}
 	}
@@ -1168,7 +1179,7 @@ func (r *Resolver) checkGlueRR(resp *dns.Msg, nss nameservers, level int) (*auth
 				foundv4[name] = struct{}{}
 
 				nsipv4[name] = append(nsipv4[name], extra.A.String())
-				authservers.List = append(authservers.List, authcache.NewAuthServer(net.JoinHostPort(extra.A.String(), "53"), authcache.IPv4))
+				authservers.List = append(authservers.List, authcache.NewNamedAuthServer(name, net.JoinHostPort(extra.A.String(), "53"), authcache.IPv4))
 			}
 		}
 	}
@@ -1517,7 +1528,7 @@ func (r *Resolver) lookup(ctx context.Context, req *dns.Msg, servers *authcache.
 	level := dns.CountLabel(servers.Zone)
 	servers.RUnlock()
 
-	authcache.Sort(serversList, atomic.AddUint64(&servers.Called, 1))
+	authcache.Sort(serversList, atomic.AddUint64(&servers.Called, 1)) // here we also need to make sure that, if a Ns has a scion address, its other addresses are removed from this list
 
 	responseErrors := []*dns.Msg{} // any received responses with RCode other than Success go here
 	configErrors := []*dns.Msg{}
@@ -1697,14 +1708,7 @@ func (r *Resolver) exchange(ctx context.Context, proto string, req *dns.Msg, ser
 			}
 		}
 
-		var hostForSNI string = "localhost"
-		// NOTE: adguard/dnsproxy uses the Host part of the remote server URL here
-		// hacky shortcut, because i know what domain-name my server's certificate is issued on ( that is 'localhost' amongst others)
-		// this has to be the domain name of the nameserver we are about to dial
-		// It is required for the crypto handshake to succeed.
-		// For production, we have to look this up with 'Reverse DNS Lookup (rDNS)' of the servers ('remote') IP address through one of the other bootstrap/root-servers
-		// TODO: create Method func hostSNIFromAddr( serverAddrToReverseLookup string, cfg *config.Config ) ( serverSNIToAddress string, error)
-
+		hostForSNI := server.NsDomainName
 		var remote pan.UDPAddr
 		remote, err = pan.ParseUDPAddr(server.Addr)
 		if err != nil {
@@ -2350,7 +2354,7 @@ func (r *Resolver) checkPriming() {
 					addr, ok := parseTXTasSCIONAddr(txt)
 					if ok {
 
-						tmpservers.List = append(tmpservers.List, authcache.NewAuthServer(WithPortIfNotSet(addr, SDoQPort), authcache.QUIC_SCION))
+						tmpservers.List = append(tmpservers.List, authcache.NewNamedAuthServer(r.Header().Name, WithPortIfNotSet(addr, SDoQPort), authcache.QUIC_SCION))
 					}
 				}
 			}
