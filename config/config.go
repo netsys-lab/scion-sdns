@@ -17,49 +17,75 @@ import (
 
 const configver = "1.2.0"
 
-// Field names have to fullfil strings.EqualFold() predicate with their corresponding key in the conf file !!
+//type ExperimentalServers []Rootserver
+
+type AddressesType struct {
+	Scion []string
+	Ipv4  []string
+	Ipv6  []string
+}
+
+type Rootserver struct {
+	Address string
+	Name    string
+}
+
+type NamedRootServerType struct {
+	Name      string
+	Addresses AddressesType
+}
+
+// Field names have to fullfil strings.EqualFold() predicate with their corresponding key
+// in the conf file !! Note that toml can only read public fields !
 // Config type
 type Config struct {
-	Version           string
-	BlockLists        []string
-	BlockListDir      string
-	RootServers       []string
-	Root6Servers      []string
-	RootSCIONServers  []string
-	RootKeys          []string
-	FallbackServers   []string
-	ForwarderServers  []string
-	AccessList        []string
-	LogLevel          string
-	AccessLog         string
-	Bind              string
-	BindSDoQ          string
-	BindTLS           string
-	BindDOH           string
-	TLSCertificate    string
-	TLSPrivateKey     string
-	API               string
-	Nullroute         string
-	Nullroutev6       string
-	Hostsfile         string
-	OutboundIPs       []string
-	OutboundIP6s      []string
-	Timeout           Duration
-	Expire            uint32
-	CacheSize         int
-	Maxdepth          int
-	RateLimit         int
-	ClientRateLimit   int
-	CookieSecret      string
-	NSID              string
-	Blocklist         []string
-	Whitelist         []string
-	Chaos             bool
-	QnameMinLevel     int `toml:"qname_min_level"`
-	EmptyZones        []string
-	CACertificateFile string
-	SCION             bool
-	Plugins           map[string]Plugin
+	ExperimentalServers02 []NamedRootServerType
+	Addresses             AddressesType
+	ExperimentalServers   []Rootserver
+
+	LookupSCIONAddressEager   bool
+	DoNotTalkToOtherThanScion bool
+
+	Version               string
+	BlockLists            []string
+	BlockListDir          string
+	NamedRootServers      [][]string
+	NamedRoot6Servers     [][]string
+	NamedRootSCIONServers [][]string
+	RootKeys              []string
+	FallbackServers       []string
+	ForwarderServers      []string
+	AccessList            []string
+	LogLevel              string
+	AccessLog             string
+	Bind                  string
+	BindSDoQ              string
+	BindTLS               string
+	BindDOH               string
+	TLSCertificate        string
+	TLSPrivateKey         string
+	API                   string
+	Nullroute             string
+	Nullroutev6           string
+	Hostsfile             string
+	OutboundIPs           []string
+	OutboundIP6s          []string
+	Timeout               Duration
+	Expire                uint32
+	CacheSize             int
+	Maxdepth              int
+	RateLimit             int
+	ClientRateLimit       int
+	CookieSecret          string
+	NSID                  string
+	Blocklist             []string
+	Whitelist             []string
+	Chaos                 bool
+	QnameMinLevel         int `toml:"qname_min_level"`
+	EmptyZones            []string
+	CACertificateFile     string
+	SCION                 bool
+	Plugins               map[string]Plugin
 
 	sVersion string
 }

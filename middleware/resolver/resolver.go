@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/miekg/dns/resolvapi"
 	"github.com/netsec-ethz/scion-apps/pkg/pan"
 	"github.com/quic-go/quic-go"
 	"github.com/semihalev/log"
@@ -44,11 +43,11 @@ type Resolver struct {
 	delegCache *cache.Cache
 	rootkeys   []dns.RR
 
-	qnameMinLevel           int // maximum treshold of level(labels from the right) beyond which no QName minimization is performed anymore
-	netTimeout              time.Duration
-	lookupSCIONAddressEager bool // if set, the resolver will try to find a SCION Address for every nameserver, even though it might already have an IP
-
-	group singleflight
+	qnameMinLevel             int // maximum treshold of level(labels from the right) beyond which no QName minimization is performed anymore
+	netTimeout                time.Duration
+	lookupSCIONAddressEager   bool // if set, the resolver will try to find a SCION Address for every nameserver, even though it might already have an IP
+	doNotTalkToOtherThanScion bool // enforce strict DNS Privacy Profile over scion (only query Nameservers with scion address)
+	group                     singleflight
 }
 
 type nameservers map[string]struct{}
@@ -111,16 +110,18 @@ func NewResolver(cfg *config.Config) *Resolver {
 		ipv6cache:  cache.New(defaultCacheSize),
 		scioncache: cache.New(defaultCacheSize),
 
-		qnameMinLevel:           cfg.QnameMinLevel,
-		netTimeout:              defaultTimeout,
-		lookupSCIONAddressEager: true, // enforce scion doq dns privacy as much as possible
+		qnameMinLevel:             cfg.QnameMinLevel,
+		netTimeout:                defaultTimeout,
+		lookupSCIONAddressEager:   cfg.LookupSCIONAddressEager, // enforce scion doq dns privacy as much as possible
+		doNotTalkToOtherThanScion: cfg.DoNotTalkToOtherThanScion,
 	}
 
 	if r.cfg.Timeout.Duration > 0 {
 		r.netTimeout = r.cfg.Timeout.Duration
 	}
 
-	r.parseRootServers(cfg)
+	//r.parseRootServers(cfg)
+	r.parseNamedRootServers(cfg)
 	r.parseOutBoundAddrs(cfg)
 
 	r.rootkeys = []dns.RR{}
@@ -137,36 +138,31 @@ func NewResolver(cfg *config.Config) *Resolver {
 	return r
 }
 
-func (r *Resolver) parseRootServers(cfg *config.Config) {
+func (r *Resolver) parseNamedRootServers(cfg *config.Config) {
 	r.rootservers = &authcache.AuthServers{}
 	r.rootservers.Zone = rootzone
 
-	for _, s := range cfg.RootServers {
-		host, _, _ := net.SplitHostPort(s)
+	for _, s := range cfg.NamedRootServers {
+
+		host, _, _ := net.SplitHostPort(s[0])
 
 		if ip := net.ParseIP(host); ip != nil && ip.To4() != nil {
-			r.rootservers.List = append(r.rootservers.List, authcache.NewAuthServer(s, authcache.IPv4))
+			r.rootservers.List = append(r.rootservers.List, authcache.NewNamedAuthServer(s[1], s[0], authcache.IPv4))
 		}
+
 	}
 
-	for _, s := range cfg.Root6Servers {
-		host, _, _ := net.SplitHostPort(s)
+	for _, s := range cfg.NamedRoot6Servers {
+		host, _, _ := net.SplitHostPort(s[0])
 
 		if ip := net.ParseIP(host); ip != nil && ip.To16() != nil {
-			r.rootservers.List = append(r.rootservers.List, authcache.NewAuthServer(s, authcache.IPv6))
+			r.rootservers.List = append(r.rootservers.List, authcache.NewNamedAuthServer(s[1], s[0], authcache.IPv6))
 		}
 	}
 
-	for _, s := range cfg.RootSCIONServers {
+	for _, s := range cfg.NamedRootSCIONServers {
 
-		// do reverse lookup with /etc/scion/hosts here ( need ServerName for TLSConfig )
-		rootserverHostnames, err := resolvapi.LookupUDPAddrHostsfile(context.TODO(), s)
-		if err != nil {
-			r.rootservers.List = append(r.rootservers.List, authcache.NewAuthServer(s, authcache.QUIC_SCION))
-		} else {
-
-			r.rootservers.List = append(r.rootservers.List, authcache.NewNamedAuthServer(rootserverHostnames[0], s, authcache.QUIC_SCION))
-		}
+		r.rootservers.List = append(r.rootservers.List, authcache.NewNamedAuthServer(s[1], s[0], authcache.QUIC_SCION))
 	}
 }
 
@@ -1522,13 +1518,22 @@ func (r *Resolver) authority(ctx context.Context, req, resp *dns.Msg, parentdsrr
 
 func (r *Resolver) lookup(ctx context.Context, req *dns.Msg, servers *authcache.AuthServers) (resp *dns.Msg, err error) {
 	var serversList []*authcache.AuthServer
-
+	enforceScion := r.doNotTalkToOtherThanScion
+retry_if_scion_only_fail:
 	servers.RLock()
 	serversList = append(serversList, servers.List...)
 	level := dns.CountLabel(servers.Zone)
 	servers.RUnlock()
 
-	authcache.Sort(serversList, atomic.AddUint64(&servers.Called, 1)) // here we also need to make sure that, if a Ns has a scion address, its other addresses are removed from this list
+	//authcache.Sort(serversList, atomic.AddUint64(&servers.Called, 1)) // here we also need to make sure that, if a Ns has a scion address, its other addresses are removed from this list
+
+	serversList = authcache.SortAndIsolate(serversList, atomic.AddUint64(&servers.Called, 1), enforceScion)
+	if len(serversList) == 0 {
+		// not a single nameserver with scion address found
+		log.Debug(" it is not possible to achieve dns privacy over Scion DoQ for zone: " + servers.Zone + " So fallback to IP")
+		enforceScion = false
+		goto retry_if_scion_only_fail
+	}
 
 	responseErrors := []*dns.Msg{} // any received responses with RCode other than Success go here
 	configErrors := []*dns.Msg{}
