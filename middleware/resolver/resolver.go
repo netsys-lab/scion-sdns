@@ -1725,7 +1725,7 @@ func (r *Resolver) exchange(ctx context.Context, proto string, req *dns.Msg, ser
 		r.tlsConfig.ServerName = ""
 
 		if err != nil {
-			fmt.Printf("dialQUIC failed in resolver: %v \n", err.Error())
+			fmt.Printf("dialQUIC to %s failed in resolver: %v \n", remote, err.Error())
 		}
 	} else {
 		log.Debug(fmt.Sprintf("Dialing %s", proto), "addr", server.Addr)
