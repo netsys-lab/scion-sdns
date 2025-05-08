@@ -18,9 +18,9 @@ type Forwarder struct {
 }
 
 func init() {
-	middleware.Register(name, func(cfg *config.Config) middleware.Handler {
-		return New(cfg)
-	})
+	//	middleware.Register(name, func(cfg *config.Config) middleware.Handler {
+	//		return New(cfg)
+	//	})
 }
 
 // New return forwarder
