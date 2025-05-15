@@ -19,9 +19,10 @@ import (
 
 // DNSHandler type
 type DNSHandler struct {
-	resolver *Resolver
-	roaCache *cache.Cache
-	cfg      *config.Config
+	resolver  *Resolver
+	roaCache  *cache.Cache
+	cfg       *config.Config
+	rhinecert []byte // the parsed PEM RHINE cert to verify DNS responses
 }
 
 type ctxKey string
@@ -41,11 +42,16 @@ func New(cfg *config.Config) *DNSHandler {
 	if cfg.Maxdepth == 0 {
 		cfg.Maxdepth = 30
 	}
+	rcert, err := LoadRHINECert(cfg.CACertificateFile)
+	if err != nil {
+		return nil
+	}
 
 	return &DNSHandler{
-		resolver: NewResolver(cfg),
-		roaCache: cache.New(defaultCacheSize),
-		cfg:      cfg,
+		resolver:  NewResolver(cfg),
+		roaCache:  cache.New(defaultCacheSize),
+		cfg:       cfg,
+		rhinecert: rcert,
 	}
 }
 
@@ -146,12 +152,12 @@ func (h *DNSHandler) handle(ctx context.Context, req *dns.Msg) *dns.Msg {
 		var dnskey *dns.DNSKEY
 		if resp.Question[0].Qtype == dns.TypeDNSKEY {
 			log.Debug("Qtype is DNSKEY, ROA is in the answer")
-			roa, ok := extractROAFromMsg(resp)
+			roa, ok := ExtractROAFromMsg(resp)
 			if !ok {
 				log.Info(errNoROA.Error())
 				break
 			}
-			if !verifyRhineROA(roa, h.cfg.CACertificateFile) {
+			if !VerifyRhineROA(roa, h.rhinecert) {
 				log.Info("The ROA verify failed!")
 				//return dnsutil.SetRcode(req, dns.RcodeServerFailure, do)
 				break
@@ -183,7 +189,7 @@ func (h *DNSHandler) handle(ctx context.Context, req *dns.Msg) *dns.Msg {
 						log.Info("Failed to get ROA, error", err, err.Error())
 						break
 					} else {
-						if !verifyRhineROA(RoA, h.cfg.CACertificateFile) {
+						if !VerifyRhineROA(RoA, h.rhinecert) {
 							log.Info("The ROA verify failed!")
 							//return dnsutil.SetRcode(req, dns.RcodeServerFailure, do)
 							break
@@ -194,7 +200,7 @@ func (h *DNSHandler) handle(ctx context.Context, req *dns.Msg) *dns.Msg {
 					}
 				}
 				addROAToMsg(RoA, resp)
-				if !rhineRRSigCheck(resp, dnskey) {
+				if err, valid := RhineRRSigCheck(resp, dnskey); err != nil || !valid {
 					log.Info("The verification of RRSIGs in response failed!")
 					//return dnsutil.SetRcode(req, dns.RcodeServerFailure, do)
 					break
@@ -226,7 +232,7 @@ func getROA(ctx context.Context, signer string, resp *dns.Msg) (roa *ROA, err er
 		msg = resp
 	}
 	log.Debug(msg.String())
-	roa, ok := extractROAFromMsg(msg)
+	roa, ok := ExtractROAFromMsg(msg)
 	if !ok {
 		log.Error("Extracting ROA failed", "error", errNoROA, "roa", roa, "msg", msg)
 		return nil, errNoROA
