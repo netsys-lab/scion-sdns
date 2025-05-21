@@ -205,8 +205,13 @@ func parseTXTasSCIONAddr(txt *dns.TXT) (addr string, ok bool) {
 	if strings.ToLower(keyvalue[0]) == "scion" && len(keyvalue) == 2 {
 		tokens := strings.SplitAfter(keyvalue[1], ",")
 		if len(tokens) == 2 {
-			addr = tokens[0] + "[" + tokens[1] + "]"
+			if strings.HasPrefix(tokens[1], "[") {
+				addr = tokens[0] + tokens[1]
+			} else {
+				addr = tokens[0] + "[" + tokens[1] + "]"
+			}
 			ok = true
+			return
 		}
 	} else {
 		scadd := SCIONAddrFromString(content)
@@ -214,10 +219,10 @@ func parseTXTasSCIONAddr(txt *dns.TXT) (addr string, ok bool) {
 			return scadd, true
 			// return ad.String() // that is somehow broken: 19-ffaa:1:1067,[127.0.0.1]:10000 becomes 19-ffaa:1:1067,127.0.0.1:10000
 		} else {
-			return
+			return "", false
 		}
 	}
-	return
+	return "", false
 }
 
 // check if SCION address has a port set
@@ -235,6 +240,9 @@ func WithPortIfNotSet(addr string, port int) string {
 	addrRegexp := regexp.MustCompile(`(?P<isia>\d+-[\d:A-Fa-f]+),(?P<host>\[?[\d.:a-z]+\]?)(:[\d]+)?`)
 
 	match := addrRegexp.FindStringSubmatch(addr)
+	if len(match) != 3 {
+		panic(fmt.Sprintf("ERROR invalid format for SCION address: %s", addr))
+	}
 
 	if match[3] != "" {
 		// address already has port

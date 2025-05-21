@@ -85,4 +85,13 @@ func Test_parseTXTasSCIONAddr(t *testing.T) {
 	assert.Equal(t, "17-ffaa:0:1102,[129.132.121.164]", addr)
 	assert.Equal(t, true, ok)
 
+	rr, err = dns.NewRR("test.com. 3600 IN TXT \"scion=19-ffaa:1:1102,[127.0.0.1]:853\"")
+	if err != nil {
+		t.Error(err)
+	}
+	txt, ok = rr.(*dns.TXT)
+	assert.Equal(t, true, ok)
+	addr, ok = parseTXTasSCIONAddr(txt)
+	assert.Equal(t, "19-ffaa:1:1102,[127.0.0.1]:853", addr)
+	assert.Equal(t, true, ok)
 }
