@@ -72,6 +72,13 @@ func Test_extractRRSet(t *testing.T) {
 	assert.Len(t, rre, 3)
 }
 
+func Test_WithPort(t *testing.T) {
+	assert.Equal(t, "17-ffaa:0:1102,129.132.121.164:853", WithPortIfNotSet("17-ffaa:0:1102,129.132.121.164", 853), "")
+
+	assert.Equal(t, "19-ffaa:1:1102,127.0.0.1:853", WithPortIfNotSet("19-ffaa:1:1102,[127.0.0.1]:853", 853), "")
+
+}
+
 func Test_parseTXTasSCIONAddr(t *testing.T) {
 	rr, err := dns.NewRR("test.com. 3600 IN TXT \"scion=17-ffaa:0:1102,129.132.121.164\"")
 	if err != nil {

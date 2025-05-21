@@ -237,18 +237,16 @@ func HasPort(addr string) bool {
 
 // adds port to SCION Address if it not yet has one
 func WithPortIfNotSet(addr string, port int) string {
-	addrRegexp := regexp.MustCompile(`(?P<isia>\d+-[\d:A-Fa-f]+),(?P<host>\[?[\d.:a-z]+\]?)(:[\d]+)?`)
 
-	match := addrRegexp.FindStringSubmatch(addr)
-	if len(match) != 3 {
+	if add, err := pan.ParseUDPAddr(addr); err != nil {
 		panic(fmt.Sprintf("ERROR invalid format for SCION address: %s", addr))
+	} else {
+		if add.Port == 0 {
+			add = add.WithPort(uint16(port))
+		}
+		return add.String()
 	}
 
-	if match[3] != "" {
-		// address already has port
-		return addr
-	}
-	return match[0] + ":" + fmt.Sprint(port)
 }
 
 /*
