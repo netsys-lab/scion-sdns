@@ -84,7 +84,6 @@ func (h *DNSHandler) ServeDNS(ctx context.Context, ch *middleware.Chain) {
 
 func (h *DNSHandler) handle(ctx context.Context, req *dns.Msg) *dns.Msg {
 	q := req.Question[0]
-	orig_req_id := req.Id
 	do := false
 	opt := req.IsEdns0()
 	if opt != nil {
@@ -181,37 +180,45 @@ func (h *DNSHandler) handle(ctx context.Context, req *dns.Msg) *dns.Msg {
 				if roa, ok := h.roaCache.Get(hash(signer)); ok {
 					log.Debug("ROA cache hit for signer: ", signer)
 					RoA = roa.(*ROA)
-					dnskey = RoA.dnskey
+				} else if _roa, roa_ok := ExtractROAFromMsg(resp); roa_ok {
+					// ROA was in the response
+					RoA = _roa
 				} else {
 					log.Debug("ROA cache not hit for, send key query to: ", signer)
 					RoA, err = getROA(ctx, signer, resp)
 					if err != nil {
 						log.Info("Failed to get ROA, error", err, err.Error())
+						resp.AuthenticatedData = false
 						break
-					} else {
-						if !VerifyRhineROA(RoA, h.rhinecert) {
-							log.Info("The ROA verify failed!")
-							//return dnsutil.SetRcode(req, dns.RcodeServerFailure, do)
-							break
-						}
-						log.Info("The ROA verified")
-						h.roaCache.Add(hash(signer), RoA)
-						dnskey = RoA.dnskey
 					}
 				}
-				addROAToMsg(RoA, resp)
-				if err, valid := RhineRRSigCheck(resp, dnskey); err != nil || !valid {
-					log.Info("The verification of RRSIGs in response failed!")
+
+				if !VerifyRhineROA(RoA, h.rhinecert) {
+					log.Info("The ROA verify failed!")
+					resp.AuthenticatedData = false
 					//return dnsutil.SetRcode(req, dns.RcodeServerFailure, do)
 					break
 				}
+				resp.AuthenticatedData = true
+				log.Info("The ROA verified")
+				h.roaCache.Add(hash(signer), RoA)
+				dnskey = RoA.dnskey
+
+				addROAToMsg(RoA, resp)
+				if err, valid := RhineRRSigCheck(resp, dnskey); err != nil || !valid {
+					log.Info("The verification of RRSIGs in response failed!")
+					resp.AuthenticatedData = false
+					//return dnsutil.SetRcode(req, dns.RcodeServerFailure, do)
+					break
+				} else {
+					resp.AuthenticatedData = true
+				}
+
 			}
 		}
 	}
 	log.Debug("Return Msg to client ", resp, resp.String())
-	if req.Id != orig_req_id {
-		fmt.Printf("ERROR: REQUEST ID MISMATCH")
-	}
+
 	return resp
 }
 func getROA(ctx context.Context, signer string, resp *dns.Msg) (roa *ROA, err error) {
